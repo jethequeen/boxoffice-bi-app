@@ -1,0 +1,24 @@
+﻿# Node modules (never push this)
+node_modules/
+
+# dotenv secrets
+.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# WebStorm/IntelliJ project config (optional)
+.idea/
+
+# Build output (if you add one later)
+dist/
+build/
+
+# Optional Docker files
+*.pid
