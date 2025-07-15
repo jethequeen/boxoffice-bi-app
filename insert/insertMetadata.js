@@ -4,7 +4,8 @@ import { getClient } from '../db/client.js';
 import dotenv from 'dotenv';
 dotenv.config();
 
-export async function insertMetadata(tmdbId) {
+export async function insertMetadata(tmdbId, fr_title) {
+    console.log(`→ insertMetadata: tmdbId=${tmdbId}, fr_title="${fr_title}"`);
     const client = getClient();
     await client.connect();
 
@@ -19,11 +20,14 @@ export async function insertMetadata(tmdbId) {
 
         // 1. Insert movie
         await client.query(
-            `INSERT INTO movies (id, title, release_date, popularity)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (id) DO NOTHING`,
-            [tmdbId, details.title, details.release_date, details.popularity]
+            `INSERT INTO movies (id, title, fr_title, release_date, popularity)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (id) DO UPDATE
+                 SET fr_title = EXCLUDED.fr_title
+             WHERE movies.fr_title IS NULL`,
+            [tmdbId, details.title, fr_title, details.release_date, details.popularity]
         );
+
 
         // 2. Insert genres
         for (const genre of details.genres || []) {

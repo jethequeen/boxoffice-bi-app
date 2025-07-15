@@ -4,7 +4,6 @@ function getWeekId(dateString) {
     const date = new Date(dateString);
     const year = date.getFullYear();
 
-    // ISO week number (based on https://en.wikipedia.org/wiki/ISO_week_date#Algorithms)
     const tempDate = new Date(date);
     tempDate.setHours(0, 0, 0, 0);
     tempDate.setDate(tempDate.getDate() + 3 - ((tempDate.getDay() + 6) % 7));
@@ -14,7 +13,7 @@ function getWeekId(dateString) {
     return parseInt(`${weekNumber}${year}`);
 }
 
-export async function insertRevenue(tmdbId, metadata, weekEndDate, data) {
+export async function insertRevenue(tmdbId, metadata, weekEndDate, data, theaterCount, usData = null) {
     const client = getClient();
     await client.connect();
 
@@ -31,6 +30,8 @@ export async function insertRevenue(tmdbId, metadata, weekEndDate, data) {
         }
 
         // 💰 2. Insérer ou mettre à jour les revenus
+        const revenueUs = usData?.weekEnd ?? null;
+
         res = await client.query(
             `SELECT id FROM revenues WHERE film_id = $1 AND weekend_id = $2`,
             [tmdbId, weekendId]
@@ -38,22 +39,45 @@ export async function insertRevenue(tmdbId, metadata, weekEndDate, data) {
 
         if (res.rowCount === 0) {
             await client.query(
-                `INSERT INTO revenues (film_id, weekend_id, revenue_qc, rank)
-                 VALUES ($1, $2, $3, $4)`,
-                [tmdbId, weekendId, data.weekEnd, data.position]
+                `INSERT INTO revenues (film_id, weekend_id, revenue_qc, revenue_us, rank, theater_count)
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [tmdbId, weekendId, data.weekEnd, revenueUs, data.position, theaterCount]
             );
         } else {
             await client.query(
                 `UPDATE revenues
-                 SET revenue_qc = $1, rank = $2
-                 WHERE id = $3`,
-                [data.weekEnd, data.position, res.rows[0].id]
+                 SET revenue_qc = $1,
+                     revenue_us = $2,
+                     rank = $3,
+                     theater_count = $5
+                 WHERE id = $4`,
+                [data.weekEnd, revenueUs, data.position, res.rows[0].id, theaterCount]
             );
         }
 
         console.log(`✓ ${metadata.title} (TMDB ID: ${tmdbId}) revenu inséré`);
     } catch (err) {
         console.error("❌ Erreur dans insertRevenue:", err);
+    } finally {
+        await client.end();
+    }
+}
+
+export async function updateCumulatives(tmdbId, { qc, us }) {
+    const client = getClient();
+    await client.connect();
+
+    try {
+        await client.query(`
+            UPDATE movies
+            SET cumulatif_qc = $1,
+                cumulatif_us = $2
+            WHERE id = $3
+        `, [qc, us, tmdbId]);
+
+        console.log(`↪️ Cumulatif mis à jour pour ${tmdbId}: QC=${qc}, US=${us}`);
+    } catch (e) {
+        console.error("❌ Erreur dans updateCumulatives:", e);
     } finally {
         await client.end();
     }
