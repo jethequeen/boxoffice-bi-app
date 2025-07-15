@@ -35,7 +35,6 @@ async function logTMDBSample(title, year) {
     await fs.writeFile('./tmdb-details.json', JSON.stringify(details, null, 2));
     await fs.writeFile('./tmdb-credits.json', JSON.stringify(credits, null, 2));
 
-    console.log(`✅ Données sauvegardées :\n- tmdb-details.json\n- tmdb-credits.json`);
 }
 
 await logTMDBSample("28 Years Later", 2025); // remplace par le film que tu veux tester
