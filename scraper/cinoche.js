@@ -12,11 +12,11 @@ function parseMoney(text) {
 
     const match = cleaned.match(/^([\d.]+)M/i);
     if (match) {
-        return Math.round(parseFloat(match[1]) * 1_000_000);  // "7.8M" → 7800000
+        return Math.round(parseFloat(match[1]) * 1_000_000);
     }
 
     const numeric = parseFloat(cleaned);
-    return isNaN(numeric) ? null : Math.round(numeric);  // fallback pour ex. "1234"
+    return isNaN(numeric) ? null : Math.round(numeric);
 }
 
 

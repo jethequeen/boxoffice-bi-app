@@ -44,6 +44,8 @@ for (const [title, qcData] of qcMap.entries()) {
     });
 
     console.log(`✓ ${title}: TMDB=${tmdbId}, QC=${qcData.weekEnd}, POS=${qcData.position}, US=${usData?.weekEnd ?? "—"}`);
-}
 
+
+
+}
 
