@@ -41,9 +41,11 @@ export async function insertRevenue(tmdbId, metadata, weekEndDate, data, theater
     const client = getClient();
     await client.connect();
     try {
-        const endISO = toISODate(weekEndDate);
-        const startISO = addDaysISO(endISO, -2);
-        const weekendId = getWeekendId_YYYYWW(endISO);
+        const fridayISO = toISODate(weekEndDate); // this is the Friday you already computed
+        const endISO    = addDaysISO(fridayISO, 2); // Sunday
+        const startISO  = fridayISO;                // Friday
+        const weekendId = getWeekendId_YYYYWW(endISO); // build YYYYWW from Sunday
+
 
         await client.query('BEGIN');
 
