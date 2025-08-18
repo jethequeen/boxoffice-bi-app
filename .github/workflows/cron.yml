@@ -2,30 +2,57 @@
 
 on:
   schedule:
+    # Run every hour
+    - cron: '0 * * * *'
+    # Explicitly run every day at 16:00 Québec
     - cron: '0 20 * * *'
   workflow_dispatch:
+
+concurrency:
+  group: boxoffice-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   run-cron:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Determine mode (America/Toronto)
+        id: gate
+        shell: bash
+        run: |
+          DOW=$(TZ=America/Toronto date +%u)   # Mon=1..Sun=7
+          HOUR=$(TZ=America/Toronto date +%H)  # 00..23
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+          if { [ "$DOW" -eq 1 ] && [ "$HOUR" -ge 15 ]; } || { [ "$DOW" -eq 2 ] && [ "$HOUR" -le 16 ]; }; then
+            echo "mode=hourly" >> "$GITHUB_OUTPUT"
+          elif [ "$HOUR" -eq 16 ]; then
+            echo "mode=daily" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=skip" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tiny noop step
+        if: steps.gate.outputs.mode == 'skip'
+        run: echo "Outside run window — exiting."
+
+      - uses: actions/checkout@v3
+        if: steps.gate.outputs.mode != 'skip'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.mode != 'skip'
         with:
           node-version: '20'
+          cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci
+      - run: npm ci
+        if: steps.gate.outputs.mode != 'skip'
 
-      - name: Create .env file
+      - name: Create .env
+        if: steps.gate.outputs.mode != 'skip'
         run: |
           echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> .env
           echo "TMDB_API_KEY=${{ secrets.TMDB_API_KEY }}" >> .env
 
-
       - name: Run cron.js
+        if: steps.gate.outputs.mode != 'skip'
         run: node cron.js
