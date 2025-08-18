@@ -2,10 +2,8 @@
 
 on:
   schedule:
-    - cron: '0 20 * * 1'  # chaque lundi à 16h00 (Québec → 20h00 UTC)
-    - cron: '0 12 * * 2'  # chaque mardi à 08h00 (Québec → 12h00 UTC)
-  workflow_dispatch:      # permet toujours de lancer manuellement
-
+    - cron: '0 20 * * *'
+  workflow_dispatch:
 
 jobs:
   run-cron:
