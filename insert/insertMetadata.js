@@ -28,13 +28,21 @@ export async function insertMetadata(tmdbId, fr_title = null) {
         const details = await detailsResp.json();
         const credits = await creditsResp.json();
 
-        if (details.status_code) {
-            throw new Error(`TMDB error: ${details.status_message}`);
+        const imagesResp = await fetch(
+            `https://api.themoviedb.org/3/movie/${tmdbId}/images?api_key=${process.env.TMDB_API_KEY}&include_image_language=fr,en,null`
+        );
+        const images = await imagesResp.json();
+
+        function choosePoster(details, images) {
+            const posters = (images.posters || []).slice().sort((a,b) => (b.vote_count||0) - (a.vote_count||0));
+            const prefLang = p => (p.iso_639_1 === 'fr' ? 3 : p.iso_639_1 === 'en' ? 2 : 1);
+            posters.sort((a,b) => prefLang(b) - prefLang(a) || (b.vote_count||0)-(a.vote_count||0));
+            return posters[0]?.file_path || details.poster_path || null;
         }
 
-        const releaseDate = details.release_date || null; // can be null/empty
+        const releaseDate = details.release_date || null;
         const popularity = details.popularity ?? 0;
-        const poster = details.poster_path ?? null;
+        const poster = choosePoster(details, images);
         const backdrop = details.backdrop_path ?? null;
         const budget = (details.budget && details.budget > 0) ? details.budget : null;
         const runtime = (details.runtime && details.runtime > 0) ? details.runtime : null;

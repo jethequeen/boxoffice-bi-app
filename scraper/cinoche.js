@@ -36,8 +36,6 @@ export function extractBoxOfficeMap(html, sectionClass) {
 
         const voMatch = $(el).find(".movie-infos").text().match(/\(([^()]+)\s+-\s+V\.O\.A\./);
         const enTitle = voMatch ? voMatch[1].trim() : title;
-        const posText = $(el).find(".table-cell-position-text").text().trim();
-        const position = parseInt(posText.replace("#", ""));
 
         let weekEnd;
         let cumulative;
@@ -56,7 +54,7 @@ export function extractBoxOfficeMap(html, sectionClass) {
         }
 
         if (enTitle && weekEnd)
-            map.set(enTitle, { weekEnd, cumulative, position, url: fullUrl, fr_title: title });
+            map.set(enTitle, { weekEnd, cumulative, url: fullUrl, fr_title: title });
     });
 
     return map;

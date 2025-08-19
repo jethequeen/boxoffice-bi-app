@@ -12,15 +12,12 @@ function toISODate(input) {
     if (isNaN(dt.getTime())) throw new Error(`Invalid date values: ${s}`);
     return dt.toISOString().slice(0, 10);
 }
-
 function addDaysISO(iso, n) {
     const [y, m, d] = iso.split('-').map(Number);
     const dt = new Date(Date.UTC(y, m - 1, d));
     dt.setUTCDate(dt.getUTCDate() + n);
     return dt.toISOString().slice(0, 10);
 }
-
-// ISO year+week as YYYYWW
 function getWeekendId_YYYYWW(dateString) {
     const iso = toISODate(dateString);
     const [y, m, d] = iso.split('-').map(Number);
@@ -31,71 +28,91 @@ function getWeekendId_YYYYWW(dateString) {
     const firstThursday = new Date(Date.UTC(isoYear, 0, 4));
     const week = 1 + Math.round(((tmp - firstThursday) / 86400000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7);
     const WW = String(week).padStart(2, '0');
-    return Number(`${isoYear}${WW}`); // e.g. 202513
+    return Number(`${isoYear}${WW}`);
+}
+
+async function recomputeRanksForWeekend(client, weekendId) {
+    await client.query(
+        `
+    WITH ranked AS (
+      SELECT film_id,
+             weekend_id,
+             RANK() OVER (
+               PARTITION BY weekend_id
+               ORDER BY revenue_qc DESC NULLS LAST
+             ) AS r
+      FROM revenues
+      WHERE weekend_id = $1
+    )
+    UPDATE revenues AS r
+    SET rank = rk.r
+    FROM ranked AS rk
+    WHERE r.film_id   = rk.film_id
+      AND r.weekend_id = rk.weekend_id
+      AND r.weekend_id = $1
+    `,
+        [weekendId]
+    );
 }
 
 
-
-
-export async function insertRevenue(tmdbId, metadata, weekEndDate, data, theaterCount, usData = null) {
+export async function insertRevenue(
+    tmdbId,
+    metadata,               // kept for backwards compat (unused here)
+    weekEndDate,            // Friday (YYYY-MM-DD)
+    data,                   // { weekEnd, position, cumulative? }
+    theaterCount,
+    usData = null           // { weekEnd?, cumulative? }
+) {
     const client = getClient();
     await client.connect();
     try {
-        const fridayISO = toISODate(weekEndDate); // this is the Friday you already computed
-        const endISO    = addDaysISO(fridayISO, 2); // Sunday
-        const startISO  = fridayISO;                // Friday
-        const weekendId = getWeekendId_YYYYWW(endISO); // build YYYYWW from Sunday
-
+        const fridayISO = toISODate(weekEndDate);
+        const endISO    = addDaysISO(fridayISO, 2);   // Sunday
+        const startISO  = fridayISO;
+        const weekendId = getWeekendId_YYYYWW(endISO);
 
         await client.query('BEGIN');
 
+        // Ensure weekend exists
         await client.query(
-            'INSERT INTO weekends (id, start_date, end_date) VALUES ($1, $2::date, $3::date) ' +
-            'ON CONFLICT (id) DO UPDATE SET start_date = EXCLUDED.start_date, end_date = EXCLUDED.end_date',
+            `INSERT INTO weekends (id, start_date, end_date)
+       VALUES ($1, $2::date, $3::date)
+       ON CONFLICT (id) DO UPDATE
+         SET start_date = EXCLUDED.start_date,
+             end_date   = EXCLUDED.end_date`,
             [weekendId, startISO, endISO]
         );
 
-        const revenueUs = usData?.weekEnd == null ? null : Number(usData.weekEnd);
         const revenueQc = Number(data?.weekEnd) || 0;
-        const rank = Number(data?.position) || null;
-        const theaters = theaterCount == null ? null : Number(theaterCount);
+        const revenueUs = usData?.weekEnd == null ? null : Number(usData.weekEnd);
+        const rank      = Number(data?.position) || null;
+        const theaters  = theaterCount == null ? null : Number(theaterCount);
+        const cumulQc   = data?.cumulative != null ? Number(data.cumulative) : null;
+        const cumulUs   = usData?.cumulative != null ? Number(usData.cumulative) : null;
 
         await client.query(
-            'INSERT INTO revenues (film_id, weekend_id, revenue_qc, revenue_us, rank, theater_count) ' +
-            'VALUES ($1, $2, $3, $4, $5, $6) ' +
-            'ON CONFLICT (film_id, weekend_id) DO UPDATE SET ' +
-            'revenue_qc = EXCLUDED.revenue_qc, revenue_us = EXCLUDED.revenue_us, rank = EXCLUDED.rank, theater_count = EXCLUDED.theater_count',
-            [tmdbId, weekendId, revenueQc, revenueUs, rank, theaters]
+            `INSERT INTO revenues (
+         film_id, weekend_id, revenue_qc, revenue_us, rank, theater_count,
+         cumulatif_qc_to_date, cumulatif_us_to_date
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (film_id, weekend_id) DO UPDATE SET
+         revenue_qc              = EXCLUDED.revenue_qc,
+         revenue_us              = EXCLUDED.revenue_us,
+         rank                    = EXCLUDED.rank,
+         theater_count           = EXCLUDED.theater_count,
+         cumulatif_qc_to_date    = COALESCE(EXCLUDED.cumulatif_qc_to_date, revenues.cumulatif_qc_to_date),
+         cumulatif_us_to_date    = COALESCE(EXCLUDED.cumulatif_us_to_date, revenues.cumulatif_us_to_date)`,
+            [tmdbId, weekendId, revenueQc, revenueUs, rank, theaters, cumulQc, cumulUs]
         );
 
+        await recomputeRanksForWeekend(client, weekendId);
         await client.query('COMMIT');
 
-        console.log(`✓ ${metadata.title} (TMDB ID: ${tmdbId}) revenu inséré`);
     } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         console.error('❌ Erreur dans insertRevenue:', err);
-    } finally {
-        await client.end();
-    }
-}
-
-
-
-export async function updateCumulatives(tmdbId, { qc, us }) {
-    const client = getClient();
-    await client.connect();
-
-    try {
-        await client.query(`
-            UPDATE movies
-            SET cumulatif_qc = $1,
-                cumulatif_us = $2
-            WHERE id = $3
-        `, [qc, us, tmdbId]);
-
-        console.log(`↪️ Cumulatif mis à jour pour ${tmdbId}: QC=${qc}, US=${us}`);
-    } catch (e) {
-        console.error("❌ Erreur dans updateCumulatives:", e);
     } finally {
         await client.end();
     }

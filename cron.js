@@ -1,5 +1,5 @@
 ﻿import {insertMetadata} from "./insert/insertMetadata.js";
-import {insertRevenue, updateCumulatives} from "./insert/insertRevenues.js";
+import {insertRevenue} from "./insert/insertRevenues.js";
 import {extractBoxOfficeMap, getCinocheHtml, getTheaterCountFromCinocheUrl} from "./scraper/cinoche.js";
 import {searchMovie} from "./insert/searchMovie.js";
 
@@ -35,17 +35,7 @@ for (const [title, qcData] of qcMap.entries()) {
 
     await insertRevenue(tmdbId, releaseYear, fridayDate, {
         weekEnd: qcData.weekEnd,
-        position: qcData.position,
+        cumulative: qcData.cumulative,
     }, theaterCount, usData);
-
-    await updateCumulatives(tmdbId, {
-        qc: qcData.cumulative ?? null,
-        us: usData?.cumulative ?? null,
-    });
-
-    console.log(`✓ ${title}: TMDB=${tmdbId}, QC=${qcData.weekEnd}, POS=${qcData.position}, US=${usData?.weekEnd ?? "—"}`);
-
-
-
 }
 
