@@ -58,11 +58,10 @@ async function recomputeRanksForWeekend(client, weekendId) {
 
 export async function insertRevenue(
     tmdbId,
-    metadata,               // kept for backwards compat (unused here)
-    weekEndDate,            // Friday (YYYY-MM-DD)
-    data,                   // { weekEnd, position, cumulative? }
-    theaterCount,
-    usData = null           // { weekEnd?, cumulative? }
+    metadata,
+    weekEndDate,
+    data,
+    usData = null
 ) {
     const client = getClient();
     await client.connect();
@@ -93,15 +92,14 @@ export async function insertRevenue(
 
         await client.query(
             `INSERT INTO revenues (
-         film_id, weekend_id, revenue_qc, revenue_us, rank, theater_count,
+         film_id, weekend_id, revenue_qc, revenue_us, rank,
          cumulatif_qc_to_date, cumulatif_us_to_date
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (film_id, weekend_id) DO UPDATE SET
          revenue_qc              = EXCLUDED.revenue_qc,
          revenue_us              = EXCLUDED.revenue_us,
          rank                    = EXCLUDED.rank,
-         theater_count           = EXCLUDED.theater_count,
          cumulatif_qc_to_date    = COALESCE(EXCLUDED.cumulatif_qc_to_date, revenues.cumulatif_qc_to_date),
          cumulatif_us_to_date    = COALESCE(EXCLUDED.cumulatif_us_to_date, revenues.cumulatif_us_to_date)`,
             [tmdbId, weekendId, revenueQc, revenueUs, rank, theaters, cumulQc, cumulUs]

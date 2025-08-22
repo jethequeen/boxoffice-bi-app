@@ -1,7 +1,7 @@
-﻿import {insertMetadata} from "./insert/insertMetadata.js";
-import {insertRevenue} from "./insert/insertRevenues.js";
-import {extractBoxOfficeMap, getCinocheHtml, getTheaterCountFromCinocheUrl} from "./scraper/cinoche.js";
-import {searchMovie} from "./insert/searchMovie.js";
+﻿import {insertMetadata} from "../insert/insertMetadata.js";
+import {insertRevenue} from "../insert/insertRevenues.js";
+import {extractBoxOfficeMap, getCinocheHtml} from "../scraper/cinoche.js";
+import {searchMovie} from "../insert/searchMovie.js";
 
 function getLastFriday() {
     const today = new Date();
@@ -31,11 +31,10 @@ for (const [title, qcData] of qcMap.entries()) {
     const usData = usMap.get(title);
 
     await insertMetadata(tmdbId, qcData.fr_title);
-    const theaterCount = await getTheaterCountFromCinocheUrl(qcData.url);
 
     await insertRevenue(tmdbId, releaseYear, fridayDate, {
         weekEnd: qcData.weekEnd,
         cumulative: qcData.cumulative,
-    }, theaterCount, usData);
+    }, usData);
 }
 

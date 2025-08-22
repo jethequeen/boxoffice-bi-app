@@ -2,9 +2,9 @@
 
 on:
   schedule:
-    # Run every hour
+    # Run every hour (used for gating by local time below)
     - cron: '0 * * * *'
-    # Explicitly run every day at 16:00 Québec
+    # Explicitly run every day at 16:00 Québec (20:00 UTC)
     - cron: '0 20 * * *'
   workflow_dispatch:
 
@@ -23,7 +23,10 @@ jobs:
           DOW=$(TZ=America/Toronto date +%u)   # Mon=1..Sun=7
           HOUR=$(TZ=America/Toronto date +%H)  # 00..23
 
-          if { [ "$DOW" -eq 1 ] && [ "$HOUR" -ge 15 ]; } || { [ "$DOW" -eq 2 ] && [ "$HOUR" -le 16 ]; }; then
+          if [ "$DOW" -eq 4 ] && [ "$HOUR" = "07" ]; then
+            echo "mode=showings" >> "$GITHUB_OUTPUT"
+          # your existing windows:
+          elif { [ "$DOW" -eq 1 ] && [ "$HOUR" -ge 15 ]; } || { [ "$DOW" -eq 2 ] && [ "$HOUR" -le 16 ]; }; then
             echo "mode=hourly" >> "$GITHUB_OUTPUT"
           elif [ "$HOUR" -eq 16 ]; then
             echo "mode=daily" >> "$GITHUB_OUTPUT"
@@ -53,6 +56,12 @@ jobs:
           echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> .env
           echo "TMDB_API_KEY=${{ secrets.TMDB_API_KEY }}" >> .env
 
+      # existing revenue cron
       - name: Run cron.js
-        if: steps.gate.outputs.mode != 'skip'
-        run: node cron.js
+        if: steps.gate.outputs.mode == 'hourly' || steps.gate.outputs.mode == 'daily'
+        run: node cron/cron.js
+
+      # NEW: weekly showings job — Thursday 07:00 America/Toronto
+      - name: Run cron_showings.js
+        if: steps.gate.outputs.mode == 'showings'
+        run: node cron/cron_showings.js
