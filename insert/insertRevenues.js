@@ -86,7 +86,6 @@ export async function insertRevenue(
         const revenueQc = Number(data?.weekEnd) || 0;
         const revenueUs = usData?.weekEnd == null ? null : Number(usData.weekEnd);
         const rank      = Number(data?.position) || null;
-        const theaters  = theaterCount == null ? null : Number(theaterCount);
         const cumulQc   = data?.cumulative != null ? Number(data.cumulative) : null;
         const cumulUs   = usData?.cumulative != null ? Number(usData.cumulative) : null;
 
@@ -102,7 +101,7 @@ export async function insertRevenue(
          rank                    = EXCLUDED.rank,
          cumulatif_qc_to_date    = COALESCE(EXCLUDED.cumulatif_qc_to_date, revenues.cumulatif_qc_to_date),
          cumulatif_us_to_date    = COALESCE(EXCLUDED.cumulatif_us_to_date, revenues.cumulatif_us_to_date)`,
-            [tmdbId, weekendId, revenueQc, revenueUs, rank, theaters, cumulQc, cumulUs]
+            [tmdbId, weekendId, revenueQc, revenueUs, rank, cumulQc, cumulUs]
         );
 
         await recomputeRanksForWeekend(client, weekendId);
