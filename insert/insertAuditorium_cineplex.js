@@ -1,6 +1,8 @@
 ﻿// insert/insertAuditorium_cineplex.js
 import puppeteer from "puppeteer";
 
+//TODO On va enlever le "total capacity", c'est moyen. On va stocker dans la db les seats directement.
+
 /* ---------- tiny helpers ---------- */
 function todayInTZ(tz) {
     const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
