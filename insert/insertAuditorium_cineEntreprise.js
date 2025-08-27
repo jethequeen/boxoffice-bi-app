@@ -1,63 +1,27 @@
 ﻿import { chromium } from "playwright";
 import minimist from "minimist";
+import fs from "fs";
+import path from "path";
 
-
-
-
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+/* ----------------- CLI ----------------- */
 const args = minimist(process.argv.slice(2));
 const { url, date, time, film, index, debug } = args;
-
 if (!url) {
     console.error('Usage: node cineEntreprise_seats.playwright.mjs --url "<cinema-or-film-page-url>" [--date YYYY-MM-DD] [--time HH:MM] [--film HO0000..] [--index N] [--debug]');
     process.exit(1);
 }
 
-// put near the other helpers
-async function advanceThroughTicketModal(page) {
-    // wait for the add-ticket modal
-    await page.waitForSelector(".mfp-content, .modal, .add-ticket-modal", { timeout: 15000 });
-
-    // add one ticket (robust selectors)
-    const plus = page.locator(".qty__plus, .quantity__plus, button[aria-label='+']");
-    if (await plus.first().isVisible().catch(()=>false)) {
-        await plus.first().click();
-    } else {
-        const num = page.locator("input[type='number'], input.qty, input.quantity").first();
-        if (await num.count()) {
-            await num.fill("1");
-            await num.dispatchEvent("input");
-            await num.dispatchEvent("change");
-        }
-    }
-
-    // Continue/Next
-    const cont = page.getByRole("button", { name: /(continuer|suivant|prochain|next|proceed)/i }).first();
-    if (await cont.isVisible().catch(()=>false)) {
-        await cont.click();
-    } else {
-        // generic primary button inside the modal
-        await page.locator(".mfp-content .std-button--primary, .modal .std-button--primary").first().click();
-    }
-
-    // either the seat map appears or we land on /cart
-    await Promise.race([
-        page.waitForSelector(".seat-map__wrapper, [class*='seat-map']", { timeout: 15000 }).catch(()=>null),
-        page.waitForNavigation({ waitUntil: "networkidle", timeout: 15000 }).catch(()=>null),
-    ]);
-}
-
-
-const toMDY = iso => {
+/* --------------- Helpers --------------- */
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const toMDY = (iso) => {
     if (!iso) return null;
     const [Y, M, D] = iso.split("-").map(Number);
-    return `${String(M).padStart(2,"0")}-${String(D).padStart(2,"0")}-${Y}`;
+    return `${String(M).padStart(2, "0")}-${String(D).padStart(2, "0")}-${Y}`;
 };
 const fromMDY_HM = (mdy, hm) => {
     const [M, D, Y] = mdy.split("-").map(Number);
     const [h, m] = hm.split(":").map(Number);
-    return new Date(Y, M-1, D, h, m, 0, 0);
+    return new Date(Y, M - 1, D, h, m, 0, 0);
 };
 
 function summarizeSeatLayout(json) {
@@ -91,7 +55,7 @@ async function readButtons(page) {
                 film: get(/currentFilm:\s*{[^}]*Value:\s*'([^']+)'/),
                 title: get(/currentFilm:\s*{[^}]*Label:\s*'([^']+)'/),
                 sessionID: get(/sessionID:\s*'([^']+)'/),
-                cinemaId: get(/cinemaId:\s*'([^']+)'/)
+                cinemaId: get(/cinemaId:\s*'([^']+)'/),
             };
         };
         return [...document.querySelectorAll("add-ticket-modal-btn[params]")].map(parse);
@@ -99,16 +63,16 @@ async function readButtons(page) {
 }
 
 async function ensureButtonsOnPage(page, baseUrl) {
-    for (let i=0;i<4;i++){
-        await page.evaluate(y => window.scrollTo(0, document.body.scrollHeight*(y+1)/4), i);
+    for (let i = 0; i < 4; i++) {
+        await page.evaluate(y => window.scrollTo(0, document.body.scrollHeight * (y + 1) / 4), i);
         await sleep(200);
     }
     let has = await page.$("add-ticket-modal-btn[params]");
     if (!has && /\/horaires\b/i.test(baseUrl)) {
         const fallback = baseUrl.replace(/\/horaires\b/i, "");
         await page.goto(fallback, { waitUntil: "networkidle", timeout: 0 });
-        for (let i=0;i<4;i++){
-            await page.evaluate(y => window.scrollTo(0, document.body.scrollHeight*(y+1)/4), i);
+        for (let i = 0; i < 4; i++) {
+            await page.evaluate(y => window.scrollTo(0, document.body.scrollHeight * (y + 1) / 4), i);
             await sleep(200);
         }
         has = await page.$("add-ticket-modal-btn[params]");
@@ -117,7 +81,6 @@ async function ensureButtonsOnPage(page, baseUrl) {
 }
 
 async function triggerShowtime(page, sessionID) {
-    // Prefer calling Knockout VM's open()
     const ok = await page.evaluate((sid) => {
         const nodes = [...document.querySelectorAll("add-ticket-modal-btn[params]")];
         for (const el of nodes) {
@@ -139,8 +102,54 @@ async function triggerShowtime(page, sessionID) {
     if (!ok) throw new Error("Could not trigger showtime");
 }
 
+// advance 1 ticket → continue (this is what creates Cine.auth / order context)
+async function advanceThroughTicketModal(page) {
+    // Wait for the ticket modal/controls to be present
+    await page.waitForSelector(
+        ".std-number__plus, .cart-validation__proceed-payment-button",
+        { timeout: 15000 }
+    );
+
+    // 1) Add 1 ticket via the real "+" button you saw
+    const plus = page.locator(".std-number__plus").first();
+    if (await plus.isVisible().catch(()=>false)) {
+        await plus.click();
+    } else {
+        // tiny fallback, in case layout changes
+        const anyPlus = page.locator(".qty__plus, .quantity__plus, button[aria-label='+']").first();
+        if (await anyPlus.isVisible().catch(()=>false)) await anyPlus.click();
+    }
+
+    // 2) Click “Ajouter au panier” once it’s enabled
+    const addToCartSel = ".cart-validation__proceed-payment-button";
+    await page.waitForSelector(addToCartSel, { timeout: 10000 });
+    await page.waitForFunction(
+        (sel) => { const b = document.querySelector(sel); return !!b && !b.disabled; },
+        addToCartSel,
+        { timeout: 10000 }
+    );
+    await page.click(addToCartSel);
+
+    // 3) Confirm the follow-up dialog “Oui”
+    // (this shows up right before the seat map)
+    const oui = page.getByRole("button", { name: /^oui$/i }).first();
+    if (await oui.isVisible().catch(()=>false)) {
+        await oui.click();
+    } else {
+        const ouiAlt = page.locator("button.std-button", { hasText: "Oui" });
+        if (await ouiAlt.isVisible().catch(()=>false)) await ouiAlt.click();
+    }
+
+    // 4) Wait for the seat map or the cart page to load
+    await Promise.race([
+        page.waitForSelector(".seat-map__wrapper, .seat-map__container, [class*='seat-map']", { timeout: 15000 }).catch(()=>null),
+        page.waitForURL(/\/cart\b/i, { timeout: 15000 }).catch(()=>null),
+        page.waitForNavigation({ waitUntil: "networkidle", timeout: 15000 }).catch(()=>null),
+    ]);
+}
+
 async function forceCart(page, sessionID, cinemaId) {
-    const cartUrl = `https://www.cinentreprise.com/cart?sessionId=${encodeURIComponent(sessionID)}&cinemaId=${encodeURIComponent(cinemaId||"")}`;
+    const cartUrl = `https://www.cinentreprise.com/cart?sessionId=${encodeURIComponent(sessionID)}&cinemaId=${encodeURIComponent(cinemaId || "")}`;
     await page.goto(cartUrl, { waitUntil: "networkidle", timeout: 0 });
 }
 
@@ -170,46 +179,40 @@ async function domFallbackCounts(page) {
     });
 }
 
-// before creating the page:
-const outDir = "debug-artifacts";
-fs.mkdirSync(outDir, { recursive: true });
-
-const context = await browser.newContext({
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-    recordHar: { path: path.join(outDir, "network.har"), content: "embed" }
-});
-await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
-const page = await context.newPage();
-
-// minimal logging for /ticketingapi/*
-page.on("request", req => {
-    if (/\/ticketingapi\//i.test(req.url())) {
-        fs.appendFileSync(path.join(outDir,"network.log"),
-            `>>> ${req.method()} ${req.url()}\n${req.postData()||""}\n\n`);
-    }
-});
-page.on("response", async res => {
-    if (/\/ticketingapi\//i.test(res.url())) {
-        let t = ""; try { t = await res.text(); } catch {}
-        fs.appendFileSync(path.join(outDir,"network.log"),
-            `<<< ${res.status()} ${res.request().method()} ${res.url()}\n${t.slice(0,4000)}\n\n`);
-    }
-});
-
+/* ----------------- Main ---------------- */
 (async () => {
-    const browser = await chromium.launch({
-        headless: true,
-        args: ["--no-sandbox"]
-    });
+    const outDir = "debug-artifacts";
+    fs.mkdirSync(outDir, { recursive: true });
+
+    const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
     const context = await browser.newContext({
-        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+        locale: "fr-CA",
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+        recordHar: { path: path.join(outDir, "network.har"), content: "embed" }
     });
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
     const page = await context.newPage();
+
+    // log only /ticketingapi/* for debugging
+    page.on("request", req => {
+        if (/\/ticketingapi\//i.test(req.url())) {
+            fs.appendFileSync(path.join(outDir, "network.log"),
+                `>>> ${req.method()} ${req.url()}\n${req.postData() || ""}\n\n`);
+        }
+    });
+    page.on("response", async res => {
+        if (/\/ticketingapi\//i.test(res.url())) {
+            let t = ""; try { t = await res.text(); } catch {}
+            fs.appendFileSync(path.join(outDir, "network.log"),
+                `<<< ${res.status()} ${res.request().method()} ${res.url()}\n${t.slice(0,4000)}\n\n`);
+        }
+    });
 
     await page.goto(url, { waitUntil: "networkidle", timeout: 0 });
 
     if (!await ensureButtonsOnPage(page, url)) {
         console.error("No showtime buttons found on the page.");
+        await context.tracing.stop({ path: path.join(outDir, "trace.zip") });
         await browser.close();
         process.exit(2);
     }
@@ -232,42 +235,38 @@ page.on("response", async res => {
     } else {
         const now = new Date();
         const scored = candidates.map(x => ({ x, dt: (x.date && x.time) ? fromMDY_HM(x.date, x.time) : new Date(8640000000000000) }));
-        const fut = scored.filter(s => s.dt > now).sort((a,b)=>a.dt-b.dt);
-        picked = (fut[0]?.x) || scored.sort((a,b)=>a.dt-b.dt)[0]?.x || null;
+        const fut = scored.filter(s => s.dt > now).sort((a, b) => a.dt - b.dt);
+        picked = (fut[0]?.x) || scored.sort((a, b) => a.dt - b.dt)[0]?.x || null;
     }
     if (!picked) {
         console.error("Could not choose a session from this URL.");
+        await context.tracing.stop({ path: path.join(outDir, "trace.zip") });
         await browser.close();
         process.exit(3);
     }
-
     if (debug) console.error("Picked:", picked);
 
-    // Try to catch the seat-plan response while we trigger the flow
+    // Try to catch the seat-plan while we run the flow
     const seatPlanPromise = page.waitForResponse(
         r => /ticketingapi\/GetSessionSeatPlan/i.test(r.url()) && r.request().method() === "POST",
         { timeout: 20000 }
     ).catch(() => null);
 
-    // Knockout open (or click)
     await triggerShowtime(page, picked.sessionID);
     await advanceThroughTicketModal(page);
 
-
-    // Race: seat-plan arrives OR a modal appears OR we navigate
+    // Race: we already might have the response, a seat-map DOM, or a nav
     const raced = await Promise.race([
         seatPlanPromise,
         page.waitForSelector(".seat-map__wrapper, #seat-map, [class*='seat-map']", { timeout: 8000 }).catch(() => null),
         page.waitForNavigation({ waitUntil: "networkidle", timeout: 8000 }).catch(() => null),
     ]);
 
-    // If nothing obvious happened, force the /cart route, which always leads to seat plan
     if (!raced) {
         await forceCart(page, picked.sessionID, picked.cinemaId);
     }
 
-    // If we still don't have the XHR, wait once more (some flows delay it)
-    const resp = raced && typeof raced.json === "function"
+    const resp = (raced && typeof raced.json === "function")
         ? raced
         : await page.waitForResponse(
             r => /ticketingapi\/GetSessionSeatPlan/i.test(r.url()) && r.request().method() === "POST",
@@ -275,11 +274,9 @@ page.on("response", async res => {
         ).catch(() => null);
 
     let seatPlan = null;
-    if (resp) {
-        try { seatPlan = await resp.json(); } catch {}
-    }
+    if (resp) { try { seatPlan = await resp.json(); } catch {} }
 
-    // Fallback: count from DOM if the API didn’t return Areas
+    // Fallback: count from DOM if API didn’t give Areas
     let summary = null;
     if (seatPlan?.ResponseData?.Areas) {
         summary = summarizeSeatLayout(seatPlan);
@@ -293,9 +290,12 @@ page.on("response", async res => {
     if (!summary) {
         if (debug) {
             const cookies = await context.cookies();
-            console.error("Seat plan fetch failed; cookies:", cookies.filter(c=>c.name.startsWith("Cine")).map(c=>({name:c.name,value:c.value.slice(0,6)+"…"})));
+            console.error("Seat plan fetch failed; cookies:",
+                cookies.filter(c => c.name.startsWith("Cine"))
+                    .map(c => ({ name: c.name, value: c.value.slice(0,6) + "…" })));
         }
         console.error(`Seat plan not accessible (sessionID=${picked.sessionID}).`);
+        await context.tracing.stop({ path: path.join(outDir, "trace.zip") });
         await browser.close();
         process.exit(5);
     }
@@ -315,6 +315,8 @@ page.on("response", async res => {
     }));
 
     await context.tracing.stop({ path: path.join(outDir, "trace.zip") });
-
     await browser.close();
-})();
+})().catch(async (e) => {
+    console.error("Fatal:", e?.message || e);
+    process.exit(10);
+});

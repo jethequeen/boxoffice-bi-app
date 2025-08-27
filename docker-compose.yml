@@ -1,0 +1,15 @@
+﻿version: "3.9"
+
+services:
+  seats-sold:
+    build: .
+    container_name: seats-sold
+    restart: unless-stopped
+    env_file:
+      - .env
+    # optional: set timezone in the container
+    environment:
+      - TZ=America/Toronto
+    # no ports exposed, since it's a background worker
+    # volumes:
+    #   - ./logs:/app/logs   # uncomment if you want persistent logs on host
