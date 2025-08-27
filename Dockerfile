@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # App directory
-WORKDIR /app
+WORKDIR /boxoffice-bi-app
 
 # Install node deps first (better layer cache)
 COPY package*.json ./
@@ -40,4 +40,4 @@ HEALTHCHECK --interval=1m --timeout=10s --start-period=30s --retries=3 \
   CMD node -e "process.exit(0)"
 
 # Run the daemon
-CMD ["node", "cron/seatsSold_daemon.js"]
+CMD ["node", "cron/seatsSold.js"]
