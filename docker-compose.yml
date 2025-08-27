@@ -6,7 +6,7 @@ services:
     container_name: seats-sold
     restart: unless-stopped
     env_file:
-      - .env
+      - .env.txt
     # optional: set timezone in the container
     environment:
       - TZ=America/Toronto
