@@ -1,190 +1,353 @@
-﻿// insert/insertAuditorium_cineplex.js
+﻿// cineplexSeatsSold.js
 import puppeteer from "puppeteer";
 
-//TODO On va enlever le "total capacity", c'est moyen. On va stocker dans la db les seats directement.
-
-/* ---------- tiny helpers ---------- */
-function todayInTZ(tz) {
-    const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" });
-    const [{ value: y }, , { value: m }, , { value: d }] = fmt.formatToParts(new Date());
-    return `${y}-${m}-${d}`;
-}
-function toMDY(iso) { const [Y,M,D] = iso.split("-").map(Number); return `${M}/${D}/${Y}`; }
-const norm = (s) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-const safe = (v) => (v == null ? "" : String(v));
-function eachDate(a,b){const out=[];let d=new Date(a+"T00:00:00");const end=new Date(b+"T00:00:00");
-    while(d<=end){const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,"0"),day=String(d.getDate()).padStart(2,"0");
-        out.push(`${y}-${m}-${day}`);d.setDate(d.getDate()+1);}return out;}
-function previewUrlFor(row) {
-    // Prefer provided seatMapUrl; otherwise build a desktop preview URL.
-    if (row.seatMapUrl) return row.seatMapUrl.replace("/fr-Mobile/", "/fr/").replace("/en-Mobile/", "/en/");
-    // Default to FR; change to /en/ if you prefer.
-    return `https://www.cineplex.com/fr/ticketing/preview?theatreId=${row.theatreId}&showtimeId=${row.vistaSessionId}&dbox=false`;
-}
-
-/* ---------- config ---------- */
-const CONFIG = {
-    locationId: 9185,
-    theatreUrl: "https://www.cineplex.com/fr/theatre/cinema-cineplex-odeon-brossard-et-vip?openTM=true",
-    lang: "fr",
-    start: todayInTZ("America/Toronto"),
-    end:   todayInTZ("America/Toronto"),
-};
 const SHOWTIMES_PREFIX = "https://apis.cineplex.com/prod/cpx/theatrical/api/v1/showtimes";
 
-// optional one-arg filter
-const TITLE_FILTER_RAW = (process.argv[2] || "").trim();
-const hasFilter = TITLE_FILTER_RAW.length > 0;
-const TITLE_FILTER = norm(TITLE_FILTER_RAW);
-const matchesTitle = (title) => !hasFilter || (title && norm(title).includes(TITLE_FILTER));
+// --- utils ---
+const norm = (s) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const squish = (s) => norm(s).replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 
-/* ---------- normalize day-list payload ---------- */
-function extractShowtimes(payload) {
-    const data = Array.isArray(payload) ? payload : [payload];
-    const rows = [];
-    for (const blk of data) {
-        const theatre = blk.theatre ?? blk.name ?? "";
-        const theatreId = blk.theatreId ?? blk.locationId ?? "";
-        for (const d of blk.dates ?? []) {
-            const dateStr = (d.startDate || "").slice(0,10);
-            for (const m of d.movies ?? []) {
-                const movie = m.name ?? m.title ?? "";
-                for (const xp of m.experiences ?? []) {
-                    const experience = Array.isArray(xp.experienceTypes) ? xp.experienceTypes.join(" + ")
-                        : (xp.experienceTypes ?? xp.name ?? "");
-                    for (const s of xp.sessions ?? []) {
-                        const iso  = s.showStartDateTime || s.startTime || "";
-                        const time = iso.includes("T") ? iso.split("T")[1].slice(0,5) : iso;
-                        rows.push({
-                            theatre, theatreId, date: dateStr, time,
-                            movie, experience,
-                            auditorium: s.auditorium || s.screenName || s.auditoriumName || s.screenNumber || "",
-                            vistaSessionId: s.vistaSessionId ?? s.showtimeId,
-                            seatMapUrl: s.seatMapUrl || s.seatingUrl || null,
-                            seatsRemaining: s.seatsRemaining ?? null,
-                        });
-                    }
-                }
+const toMDY = (iso) => {
+    const [Y, M, D] = iso.split("-").map(Number);
+    return `${M}/${D}/${Y}`;
+};
+
+const hhmmFrom = (s) => {
+    if (!s) return "";
+    const t = s.includes("T") ? s.split("T")[1] : s;
+    return t.slice(0, 5); // HH:MM
+};
+
+// Flatten Cineplex payload to session candidates
+function flattenShowtimesPayload(json) {
+    const out = [];
+    const movies = json?.dates?.[0]?.movies ?? [];
+    for (const m of movies) {
+        for (const exp of m.experiences ?? []) {
+            for (const s of exp.sessions ?? []) {
+                out.push({
+                    movieName: m.name,
+                    filmUrl: m.filmUrl,
+                    runtimeInMinutes: m.runtimeInMinutes,
+                    languageCode: m.languageCode,
+                    experienceTypes: exp.experienceTypes,
+                    auditorium: s.auditorium,
+                    showStartDateTime: s.showStartDateTime,        // local wall time
+                    showStartDateTimeUtc: s.showStartDateTimeUtc,  // UTC (no Z)
+                    vistaSessionId: s.vistaSessionId,
+                    seatsRemaining: s.seatsRemaining,
+                    areaCode: s.areaCode,
+                    seatMapUrl: s.seatMapUrl || null,
+                });
             }
         }
     }
-    rows.sort((a,b)=>
-        safe(a.theatre).localeCompare(safe(b.theatre)) ||
-        safe(a.date).localeCompare(safe(b.date)) ||
-        safe(a.time).localeCompare(safe(b.time)) ||
-        safe(a.movie).localeCompare(safe(b.movie))
-    );
-    return rows;
+    return out;
 }
 
-/* ---------- counts from the preview page network (seat-availability / seat-layout) ---------- */
-async function getCountsFromPreview(browser, row) {
-    const p = await browser.newPage();
-    // speed up: skip assets
-    await p.setRequestInterception(true);
-    p.on("request", (req) => {
-        const t = req.resourceType();
-        if (["image","font","stylesheet"].includes(t)) req.abort(); else req.continue();
-    });
-
-    let available = 0, occupied = 0;
-    let sawUseful = false;
-
-    p.on("response", async (res) => {
-        const url = res.url();
-        if (!/seat-availability|seat-layout/i.test(url)) return;
-        try {
-            const ctype = res.headers()["content-type"] || "";
-            if (!/json/i.test(ctype)) return;
-            const data = await res.json();
-
-            // A) { seatAvailabilities: { "...": "Available" | "Occupied" | "Broken" | ... } }
-            if (data && data.seatAvailabilities && typeof data.seatAvailabilities === "object") {
-                available = 0; occupied = 0;
-                for (const v of Object.values(data.seatAvailabilities)) {
-                    const s = String(v).toLowerCase();
-                    if (s === "available") available++;
-                    else if (s === "occupied") occupied++;
-                    // ignore broken/held/etc for capacity
-                }
-                sawUseful = true;
-                return;
-            }
-
-            // B) { areas: [{ seats: [...] }...] } — count by status
-            if (Array.isArray(data?.areas)) {
-                available = 0; occupied = 0;
-                for (const a of data.areas) {
-                    for (const s of (a.seats || [])) {
-                        const raw = (s.status ?? s.state ?? s.State ?? "").toString().toLowerCase();
-                        const isAvail = s.available === true || raw === "available";
-                        const isOcc   = s.isOccupied === true || raw === "occupied" || raw === "sold";
-                        if (isAvail) available++; else if (isOcc) occupied++;
-                    }
-                }
-                sawUseful = true;
-                return;
-            }
-        } catch { /* ignore non-json */ }
-    });
-
-    // open preview, wait a tick for XHRs
-    const url = previewUrlFor(row);
-    await p.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await new Promise(r => setTimeout(r, 1200)); // give seat-availability calls time to finish
-    await p.close();
-
-    if (!sawUseful) return null;
-    const capacity = available + occupied;
-    return { capacity, remaining: available, sold: occupied };
+// --- dedupe helpers ---
+function sessionKey(r) {
+    // Prefer unique Vista id; fallback to aud+start+film
+    return r.vistaSessionId
+        ? `v:${r.vistaSessionId}`
+        : `k:${(r.auditorium || "").trim()}|${r.showStartDateTimeUtc || r.showStartDateTime || ""}|${r.filmUrl || r.movieName || ""}`;
 }
 
-/* ---------- minimal output ---------- */
-function printSimple(r, counts) {
-    if (counts && counts.capacity != null) {
-        console.log(`${r.movie} | ${r.auditorium || "?"} | ${r.date} ${r.time} | sold ${counts.sold} / capacity ${counts.capacity}`);
-    } else {
-        const rem = r.seatsRemaining ?? "?";
-        console.log(`${r.movie} | ${r.auditorium || "?"} | ${r.date} ${r.time} | remaining ${rem} / capacity ?`);
+function areaPriority(areaCode) {
+    if (areaCode === "0000000001") return 3; // General Admission
+    if (areaCode === "0000000004") return 1; // D-BOX
+    return 2; // everything else
+}
+
+function experiencePriority(expTypes) {
+    const arr = Array.isArray(expTypes) ? expTypes.map((x) => String(x).toLowerCase()) : [];
+    if (arr.some((x) => x.includes("regular"))) return 2;
+    if (arr.some((x) => x.includes("d-box") || x.includes("dbox"))) return 1;
+    return 0;
+}
+
+function dedupeSessions(cands) {
+    const byKey = new Map();
+    for (const r of cands) {
+        const key = sessionKey(r);
+        const prev = byKey.get(key);
+        if (!prev) {
+            byKey.set(key, r);
+            continue;
+        }
+        // prefer GA + "Regular" (represents the full auditorium)
+        const prevScore = areaPriority(prev.areaCode) * 100 + experiencePriority(prev.experienceTypes);
+        const nextScore = areaPriority(r.areaCode) * 100 + experiencePriority(r.experienceTypes);
+        if (nextScore > prevScore) byKey.set(key, r);
     }
+    return Array.from(byKey.values());
 }
 
-/* ========================= MAIN ========================= */
-(async () => {
-    const { locationId, theatreUrl, lang, start, end } = CONFIG;
+// --- auditorium matching helpers (DB) ---
+function normalizeAudName(s) {
+    return (s || "")
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/\b(salle|aud|auditorium|screen|vip)\b/g, "")
+        .replace(/[#]/g, "")
+        .replace(/\s+/g, "")
+        .replace(/(^|[^\d])0+(\d)/g, "$1$2"); // remove leading zeros before a digit
+}
+function extractDigits(s) {
+    const m = (s || "").match(/\d+/g);
+    return m ? m.join("") : "";
+}
 
+/** Get the Ocp-Apim-Subscription-Key by visiting a theatre page once. */
+export async function getShowtimesKeyFromTheatreUrl(theatreUrl) {
     const browser = await puppeteer.launch({ headless: "new" });
-    const page = await browser.newPage();
+    try {
+        const page = await browser.newPage();
+        let key = null;
+        page.on("request", (req) => {
+            if (req.url().startsWith(SHOWTIMES_PREFIX)) {
+                const k = req.headers()["ocp-apim-subscription-key"];
+                if (k) key = k;
+            }
+        });
+        await page.goto(theatreUrl, { waitUntil: "networkidle2", timeout: 45000 });
+        if (!key) await new Promise((r) => setTimeout(r, 800));
+        if (!key) throw new Error("Could not capture Ocp-Apim-Subscription-Key");
+        return key;
+    } finally {
+        await browser.close();
+    }
+}
 
-    // capture showtimes key (needed to pull the day list)
-    let showtimesKey = null;
-    page.on("request", (req) => {
-        const url = req.url();
-        if (url.startsWith(SHOWTIMES_PREFIX)) {
-            const k = req.headers()["ocp-apim-subscription-key"];
-            if (k) showtimesKey = k;
-        }
+/**
+ * Fetch Cineplex showtimes once, then:
+ *  - filter by date & exact HH:MM
+ *  - de-dup exact same show
+ *  - if multiple remain, narrow by title; if still multiple and same auditorium, pick the first
+ */
+export async function fetchSeatsForShowtime({
+                                                locationId,
+                                                date,          // "YYYY-MM-DD"
+                                                movieTitle,    // fuzzy, used for tie-breaks
+                                                showtime,      // "HH:MM"
+                                                lang = "fr",
+                                                showtimesKey,
+                                                wantRuntime = null,
+                                            }) {
+    if (!showtimesKey) throw new Error("showtimesKey required");
+
+    const url = `${SHOWTIMES_PREFIX}?language=${encodeURIComponent(lang)}&locationId=${encodeURIComponent(
+        String(locationId)
+    )}&date=${encodeURIComponent(toMDY(date))}`;
+
+    const res = await fetch(url, {
+        headers: { Accept: "application/json", "Ocp-Apim-Subscription-Key": showtimesKey },
     });
-    await page.goto(theatreUrl, { waitUntil: "networkidle2" });
-    if (!showtimesKey) await new Promise(r => setTimeout(r, 800));
-    if (!showtimesKey) { await browser.close(); throw new Error("Could not capture showtimes key."); }
+    if (!res.ok) throw new Error(`Showtimes fetch failed: ${res.status}`);
 
-    const dates = eachDate(start, end);
-    for (const iso of dates) {
-        const mdy = toMDY(iso);
-        const url = `${SHOWTIMES_PREFIX}?language=${encodeURIComponent(lang)}&locationId=${encodeURIComponent(String(locationId))}&date=${encodeURIComponent(mdy)}`;
+    const payload = await res.json();
+    const blocks = Array.isArray(payload) ? payload : [payload];
 
-        const res = await fetch(url, { headers: { Accept: "application/json", "Ocp-Apim-Subscription-Key": showtimesKey } });
-        if (!res.ok) continue;
+    // Flatten + dedupe globally
+    let all = [];
+    for (const blk of blocks) all = all.concat(flattenShowtimesPayload(blk));
+    all = dedupeSessions(all);
 
-        const rows = extractShowtimes(await res.json());
-        const filtered = rows.filter((r) => matchesTitle(r.movie));
+    const todays = all.filter((r) => (r.showStartDateTime || "").slice(0, 10) === date);
+    const wantHHMM = showtime.slice(0, 5);
 
-        for (const r of filtered) {
-            const counts = await getCountsFromPreview(browser, r);
-            printSimple(r, counts);
+    // Exact minute filter
+    let atMinute = todays.filter((r) => hhmmFrom(r.showStartDateTime) === wantHHMM);
+    if (atMinute.length === 0) {
+        throw new Error(
+            `match-failed ${JSON.stringify({ status: "NO_MATCH_AT_TIME", theatreId: locationId, wantTime: wantHHMM })}`
+        );
+    }
+
+    // --- FIRST tie-break: runtime (±3 min). Only apply if we have a target and any runtimes exist.
+    if (Number.isFinite(wantRuntime) && atMinute.some(r => Number.isFinite(r.runtimeInMinutes))) {
+        const withRt   = atMinute.filter(r => Number.isFinite(r.runtimeInMinutes));
+        const byRt     = withRt.filter(r => Math.abs(r.runtimeInMinutes - wantRuntime) <= 3);
+        if (byRt.length === 1) {
+            atMinute = byRt;
+        } else if (byRt.length > 1) {
+            atMinute = byRt; // keep narrowed set and continue tie-breaks
+        }
+        // if byRt.length === 0, keep original atMinute (don’t over-filter)
+    }
+
+    // SECOND tie-break: title (loose)
+    if (atMinute.length > 1 && movieTitle) {
+        const want = (movieTitle || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        const wantLoose = want.replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+        const narrowed = atMinute.filter(r => {
+            const n = (r.movieName || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            const sq = n.replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+            return n.includes(want) || sq.includes(wantLoose);
+        });
+        if (narrowed.length > 0) atMinute = narrowed;
+    }
+
+    // THIRD: if same auditorium, take first (duplicates like GA/DBOX views of same show)
+    if (atMinute.length > 1) {
+        const audSet = new Set(atMinute.map(r => (r.auditorium || "").trim()));
+        if (audSet.size === 1) return atMinute[0];
+        // otherwise prefer GA areaCode then first
+        const ga = atMinute.find(r => r.areaCode === "0000000001");
+        if (ga) return ga;
+    }
+
+    return atMinute[0];
+}
+
+/**
+ * Upsert seats_sold into `showings` (NO time gating).
+ * - Resolves screen capacity from `screens` via (theater_id, name) with normalization.
+ * - start_at prefers Cineplex UTC instant when available.
+ */
+export async function upsertSeatsSold({
+                                          pgClient,          // connected pg Client
+                                          movie_id,
+                                          theater_id,
+                                          local_date,        // "YYYY-MM-DD"
+                                          local_time,        // "HH:MM"
+                                          movieTitle,
+                                          // Either pass these:
+                                          locationId,
+                                          showtimesKey,
+                                          // Or let it read from theaters table and sniff:
+                                          theatreUrl,
+                                          lang = "fr",
+                                      }) {
+    // Resolve locationId + key if needed
+    let locId = locationId;
+    let key = showtimesKey;
+
+    if (!locId || !key) {
+        const q = await pgClient.query(
+            `SELECT theater_api_id, showings_url FROM theaters WHERE id = $1 LIMIT 1`,
+            [theater_id]
+        );
+        if (q.rowCount === 0) throw new Error(`theater_id=${theater_id} not found`);
+        locId = locId || q.rows[0].theater_api_id;
+        if (!locId) throw new Error(`theater_id=${theater_id} missing theater_api_id`);
+        if (!key) {
+            const url = theatreUrl || q.rows[0].showings_url;
+            if (!url) throw new Error(`No theatre URL on theaters.showings_url for theater_id=${theater_id}`);
+            key = await getShowtimesKeyFromTheatreUrl(url);
         }
     }
 
-    await browser.close();
-})();
+    // Fetch movie runtime (best-effort; works regardless of column naming)
+    let wantRuntime = null;
+    try {
+        const mq = await pgClient.query(`SELECT * FROM movies WHERE id = $1 LIMIT 1`, [movie_id]);
+        if (mq.rowCount) {
+            const r = mq.rows[0];
+            // Try common column names in order; keep first valid positive number
+            const candidates = [r.runtime_minutes, r.runtime, r.length_minutes, r.duration_minutes, r.duration];
+            for (const v of candidates) {
+                const n = Number(v);
+                if (Number.isFinite(n) && n > 0) { wantRuntime = n; break; }
+            }
+        }
+    } catch (_) { /* ignore – runtime is optional */ }
+
+    // Fetch + match one session
+    const info = await fetchSeatsForShowtime({
+        locationId: locId,
+        date: local_date,
+        movieTitle,
+        showtime: local_time,
+        lang,
+        showtimesKey: key,
+        wantRuntime,
+    });
+
+    if (info.seatsRemaining == null) {
+        throw new Error("seatsRemaining is null in Cineplex payload");
+    }
+
+    // Match screen & capacity (with normalization)
+    const auditoriumRaw = (info.auditorium || "").trim();
+    const audNorm = normalizeAudName(auditoriumRaw);
+    const audDigits = extractDigits(auditoriumRaw);
+
+    // 1) exact
+    let res = await pgClient.query(
+        `SELECT id, name, seat_count FROM screens WHERE theater_id = $1 AND name = $2 LIMIT 1`,
+        [theater_id, auditoriumRaw]
+    );
+
+    // 2) normalized best pick
+    if (res.rowCount === 0) {
+        const all = await pgClient.query(
+            `SELECT id, name, seat_count FROM screens WHERE theater_id = $1`,
+            [theater_id]
+        );
+        let best = null;
+        for (const row of all.rows) {
+            const n = normalizeAudName(row.name);
+            const d = extractDigits(row.name);
+            let score = 3; // lower is better
+            if (n === audNorm) score = 0;
+            else if (d && d === audDigits) score = 1;
+            else if (n && audNorm && (n.includes(audNorm) || audNorm.includes(n))) score = 1.5;
+
+            if (!best || score < best.score || (score === best.score && (row.name || "").length < (best.row.name || "").length)) {
+                best = { row, score };
+            }
+        }
+        if (best && best.score <= 1.5) {
+            res = { rowCount: 1, rows: [best.row] };
+        }
+    }
+
+    // 3) last resort: legacy ILIKE
+    if (res.rowCount === 0) {
+        res = await pgClient.query(
+            `SELECT id, name, seat_count FROM screens WHERE theater_id = $1 AND name ILIKE $2 ORDER BY LENGTH(name) ASC LIMIT 1`,
+            [theater_id, `%${auditoriumRaw}%`]
+        );
+    }
+
+    if (res.rowCount === 0) {
+        throw new Error(`No screen matched auditorium="${auditoriumRaw}" in theater_id=${theater_id}`);
+    }
+
+    const screen_id = res.rows[0].id;
+    const capacity  = Number(res.rows[0].seat_count) || 0;
+    const remaining = Number(info.seatsRemaining);
+    const seats_sold = Math.max(0, capacity - remaining);
+
+    // Prefer Cineplex UTC (string is UTC without 'Z')
+    const start_at = info.showStartDateTimeUtc
+        ? new Date(info.showStartDateTimeUtc + "Z").toISOString()
+        : `${local_date}T${local_time}:00Z`;
+
+    const up = await pgClient.query(
+        `
+            INSERT INTO showings (movie_id, theater_id, start_at, date, screen_id, seats_sold)
+            VALUES ($1, $2, $3::timestamptz, $4::date, $5, $6)
+            ON CONFLICT (movie_id, theater_id, start_at, date)
+                DO UPDATE SET
+                              screen_id = EXCLUDED.screen_id,
+                              seats_sold = EXCLUDED.seats_sold,
+                              scraped_at = now()
+            RETURNING *
+        `,
+        [movie_id, theater_id, start_at, local_date, screen_id, seats_sold]
+    );
+
+    return {
+        theater_id,
+        movie_id,
+        screen_id,
+        auditorium: auditoriumRaw,
+        capacity,
+        remaining,
+        seats_sold,
+        start_at: up.rows[0].start_at,
+        row: up.rows[0],
+    };
+}
