@@ -72,9 +72,16 @@ export async function insertRevenue(
     await client.connect();
     try {
         const fridayISO = toISODate(weekEndDate);
-        const endISO    = addDaysISO(fridayISO, 2);   // Sunday
         const startISO  = fridayISO;
+        const endISO    = addDaysISO(fridayISO, 2);   // Sunday
         const weekendId = getWeekendId_YYYYWW(endISO);
+
+        // Parse numbers from Cinoche payloads
+        const revenueQc = data?.weekEnd != null ? Number(data.weekEnd) : 0;
+        const revenueUs = usData?.weekEnd != null ? Number(usData.weekEnd) : null;
+        const rank      = data?.position != null ? Number(data.position) : null;
+        const cumulQc   = data?.cumulative != null ? Number(data.cumulative) : null;
+        const cumulUs   = usData?.cumulative != null ? Number(usData.cumulative) : null;
 
         await client.query('BEGIN');
 
@@ -88,31 +95,67 @@ export async function insertRevenue(
             [weekendId, startISO, endISO]
         );
 
-        const revenueQc = Number(data?.weekEnd) || 0;
-        const revenueUs = usData?.weekEnd == null ? null : Number(usData.weekEnd);
-        const rank      = Number(data?.position) || null;
-        const cumulQc   = data?.cumulative != null ? Number(data.cumulative) : null;
-        const cumulUs   = usData?.cumulative != null ? Number(usData.cumulative) : null;
-
+        // Insert/Upsert revenue + compute occupancy & showings proportion
         await client.query(
-            `INSERT INTO revenues (
-         film_id, weekend_id, revenue_qc, revenue_us, rank,
-         cumulatif_qc_to_date, cumulatif_us_to_date
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (film_id, weekend_id) DO UPDATE SET
-         revenue_qc              = EXCLUDED.revenue_qc,
-         revenue_us              = EXCLUDED.revenue_us,
-         rank                    = EXCLUDED.rank,
-         cumulatif_qc_to_date    = COALESCE(EXCLUDED.cumulatif_qc_to_date, revenues.cumulatif_qc_to_date),
-         cumulatif_us_to_date    = COALESCE(EXCLUDED.cumulatif_us_to_date, revenues.cumulatif_us_to_date),
-         data_source          = 'cinoche'`,
+            `
+      WITH w AS (
+        SELECT start_date, end_date FROM weekends WHERE id = $2
+      ),
+      wk AS (
+        SELECT s.movie_id::int AS film_id,
+               s.screen_id,
+               s.seats_sold::numeric AS seats_sold
+        FROM showings s, w
+        WHERE s.date BETWEEN w.start_date AND w.end_date
+          AND s.movie_id::int = $1
+      ),
+      occ AS (
+        SELECT
+          CASE
+            WHEN COUNT(*) FILTER (WHERE seats_sold IS NOT NULL) = 0 THEN NULL
+            ELSE (SUM(seats_sold) / NULLIF(SUM(sc.seat_count),0))::numeric
+          END AS average_occupancy
+        FROM wk
+        JOIN screens sc ON sc.id = wk.screen_id
+        WHERE wk.seats_sold IS NOT NULL
+      ),
+      counts AS (
+        SELECT
+          (SELECT COUNT(*) FROM wk) AS film_cnt,
+          (SELECT COUNT(*) FROM showings s, w
+            WHERE s.date BETWEEN w.start_date AND w.end_date) AS total_cnt
+      ),
+      feats AS (
+        SELECT
+          o.average_occupancy::numeric(6,4) AS average_occupancy,
+          (counts.film_cnt::numeric / NULLIF(counts.total_cnt,0))::numeric(6,4) AS showings_proportion
+        FROM occ o, counts
+      )
+      INSERT INTO revenues (
+        film_id, weekend_id, revenue_qc, revenue_us, rank,
+        cumulatif_qc_to_date, cumulatif_us_to_date, data_source,
+        average_showing_occupancy, showings_proportion
+      )
+      SELECT
+        $1, $2, $3, $4, $5,
+        $6, $7, 'cinoche',
+        f.average_occupancy, f.showings_proportion
+      FROM feats f
+      ON CONFLICT (film_id, weekend_id) DO UPDATE SET
+        revenue_qc              = EXCLUDED.revenue_qc,
+        revenue_us              = EXCLUDED.revenue_us,
+        rank                    = EXCLUDED.rank,
+        cumulatif_qc_to_date    = COALESCE(EXCLUDED.cumulatif_qc_to_date, revenues.cumulatif_qc_to_date),
+        cumulatif_us_to_date    = COALESCE(EXCLUDED.cumulatif_us_to_date, revenues.cumulatif_us_to_date),
+        data_source             = 'cinoche',
+        average_showing_occupancy = EXCLUDED.average_showing_occupancy,
+        showings_proportion       = EXCLUDED.showings_proportion
+      `,
             [tmdbId, weekendId, revenueQc, revenueUs, rank, cumulQc, cumulUs]
         );
 
         await recomputeRanksForWeekend(client, weekendId);
         await client.query('COMMIT');
-
     } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         console.error('❌ Erreur dans insertRevenue:', err);
