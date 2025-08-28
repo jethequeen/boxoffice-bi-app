@@ -1,7 +1,8 @@
 ﻿import {insertMetadata} from "../insert/insertMetadata.js";
-import {insertRevenue} from "../insert/insertRevenues.js";
+import {insertRevenue, getWeekendId_YYYYWW, addDaysISO} from "../insert/insertRevenues.js";
 import {extractBoxOfficeMap, getCinocheHtml} from "../scraper/cinoche.js";
 import {searchMovie} from "../insert/searchMovie.js";
+import { insertWeekendEstimates } from '../insert/insertWeekendEstimates.js';
 
 function getLastFriday() {
     const today = new Date();
@@ -11,6 +12,8 @@ function getLastFriday() {
     friday.setDate(today.getDate() - diff);
     return friday.toISOString().split("T")[0]; // Format: YYYY-MM-DD
 }
+
+
 
 
 const fridayDate = getLastFriday();
@@ -37,4 +40,11 @@ for (const [title, qcData] of qcMap.entries()) {
         cumulative: qcData.cumulative,
     }, usData);
 }
+
+const endISO    = addDaysISO(fridayDate, 2);
+const weekendId = getWeekendId_YYYYWW(endISO);
+
+// $14 default; change if you want to pass a param
+await insertWeekendEstimates(weekendId, 14);
+console.log(`✅ Weekend estimates inserted for ${weekendId}`);
 

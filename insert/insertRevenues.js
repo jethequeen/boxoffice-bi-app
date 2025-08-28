@@ -12,13 +12,17 @@ function toISODate(input) {
     if (isNaN(dt.getTime())) throw new Error(`Invalid date values: ${s}`);
     return dt.toISOString().slice(0, 10);
 }
-function addDaysISO(iso, n) {
+
+
+export function addDaysISO(iso, n) {
     const [y, m, d] = iso.split('-').map(Number);
     const dt = new Date(Date.UTC(y, m - 1, d));
     dt.setUTCDate(dt.getUTCDate() + n);
     return dt.toISOString().slice(0, 10);
 }
-function getWeekendId_YYYYWW(dateString) {
+
+
+export function getWeekendId_YYYYWW(dateString) {
     const iso = toISODate(dateString);
     const [y, m, d] = iso.split('-').map(Number);
     const date = new Date(Date.UTC(y, m - 1, d));
@@ -31,7 +35,8 @@ function getWeekendId_YYYYWW(dateString) {
     return Number(`${isoYear}${WW}`);
 }
 
-async function recomputeRanksForWeekend(client, weekendId) {
+
+export async function recomputeRanksForWeekend(client, weekendId) {
     await client.query(
         `
     WITH ranked AS (
@@ -100,7 +105,8 @@ export async function insertRevenue(
          revenue_us              = EXCLUDED.revenue_us,
          rank                    = EXCLUDED.rank,
          cumulatif_qc_to_date    = COALESCE(EXCLUDED.cumulatif_qc_to_date, revenues.cumulatif_qc_to_date),
-         cumulatif_us_to_date    = COALESCE(EXCLUDED.cumulatif_us_to_date, revenues.cumulatif_us_to_date)`,
+         cumulatif_us_to_date    = COALESCE(EXCLUDED.cumulatif_us_to_date, revenues.cumulatif_us_to_date),
+         data_source          = 'cinoche'`,
             [tmdbId, weekendId, revenueQc, revenueUs, rank, cumulQc, cumulUs]
         );
 
