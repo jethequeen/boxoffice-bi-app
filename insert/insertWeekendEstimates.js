@@ -2,9 +2,43 @@
 import { getClient } from '../db/client.js';
 import { refreshPopularity } from '../helpers/refreshPopularity.js';
 
+// add this helper (same logic you used server-side)
+function fridaySundayFromWeekendId(weekendId) {
+    const s = String(weekendId);
+    const isoYear = Number(s.slice(0, 4));
+    const isoWeek = Number(s.slice(4));
+    const jan4 = new Date(Date.UTC(isoYear, 0, 4));
+    const jan4Dow = (jan4.getUTCDay() + 6) % 7;              // 0=Mon..6=Sun
+    const monday = new Date(Date.UTC(isoYear, 0, 4 - jan4Dow + (isoWeek - 1) * 7));
+    const sunday = new Date(monday); sunday.setUTCDate(monday.getUTCDate() + 6);
+    const friday = new Date(sunday); friday.setUTCDate(sunday.getUTCDate() - 2);
+    const toISO = (d) => d.toISOString().slice(0, 10);
+    return { startISO: toISO(friday), endISO: toISO(sunday) };
+}
+
+
 export async function insertWeekendEstimates(weekendId, ticketPrice = 14) {
     const client = getClient();
     await client.connect();
+
+    // --- ensure the weekend row exists (idempotent) ---
+    try {
+        const { startISO, endISO } = fridaySundayFromWeekendId(weekendId);
+        await client.query(
+            `
+    INSERT INTO weekends (id, start_date, end_date)
+    VALUES ($1, $2::date, $3::date)
+    ON CONFLICT (id) DO UPDATE
+      SET start_date = EXCLUDED.start_date,
+          end_date   = EXCLUDED.end_date
+    `,
+            [weekendId, startISO, endISO]
+        );
+    } catch (e) {
+        console.error(`[estimates] failed to ensure weekend ${weekendId}:`, e.message);
+        // you can choose to throw here; if you continue, later queries will succeed
+    }
+
 
     // --- diagnostics: print weekend date range & counts (Fri–Sun) ---
     try {
@@ -58,12 +92,16 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14) {
         WHERE (s.date BETWEEN (w.end_date - INTERVAL '6 day') AND w.end_date)
            OR  (s.date = (w.start_date - INTERVAL '1 day'))
       ),
-      cinoche_top10 AS (
-        SELECT r.film_id FROM revenues r WHERE r.weekend_id = $1 AND r.rank BETWEEN 1 AND 10
-      ),
       already_had AS (
         SELECT r.film_id FROM revenues r WHERE r.weekend_id = $1
       ),
+           cinoche_top10 AS (
+               SELECT r.film_id
+               FROM revenues r
+               WHERE r.weekend_id = $1
+                 AND r.data_source = 'cinoche'
+                 AND r.rank BETWEEN 1 AND 10
+           ),
       eligible AS (
         SELECT fp.film_id
         FROM film_pool fp
@@ -83,7 +121,16 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14) {
         SELECT film_id FROM existing_estimates
       ),
 
-      /* ---------- is-first flags (for occupancy + seat estimation) ---------- */
+           cinoche_floor AS (
+               SELECT MIN(r.revenue_qc)::bigint AS floor_top10
+               FROM revenues r
+               WHERE r.weekend_id = $1
+                 AND r.data_source = 'cinoche'
+                 AND r.rank BETWEEN 1 AND 10
+           ),
+
+
+          /* ---------- is-first flags (for occupancy + seat estimation) ---------- */
       first_flags AS (
         SELECT t.film_id,
                NOT EXISTS (
@@ -260,24 +307,21 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14) {
         GROUP BY film_id
       ),
 
-      weekend_money AS (
-        SELECT
-          t.film_id,
-          CASE
-            WHEN wk.seats_weekend IS NULL THEN NULL
-            ELSE GREATEST(
-              0,
-              LEAST(
-                wk.seats_weekend * $2,
-                COALESCE((SELECT MIN(r2.revenue_qc)
-                          FROM revenues r2
-                          WHERE r2.weekend_id = $1 AND r2.rank BETWEEN 1 AND 10), 1e12) - 10
-              )
-            )::bigint
-          END AS revenue_weekend
-        FROM targets t
-        LEFT JOIN wk_seats wk USING (film_id)
-      ),
+           weekend_money AS (
+               SELECT
+                   t.film_id,
+                   CASE
+                       WHEN wk.seats_weekend IS NULL THEN NULL
+                       WHEN cf.floor_top10 IS NULL
+                           THEN GREATEST(0, (wk.seats_weekend * $2))::bigint
+                       ELSE
+                           GREATEST(0, LEAST((wk.seats_weekend * $2), cf.floor_top10 - 10))::bigint
+                       END AS revenue_weekend
+               FROM targets t
+                        LEFT JOIN wk_seats     wk USING (film_id)
+                        LEFT JOIN cinoche_floor cf ON TRUE
+           ),
+
       midweek_money AS (
         SELECT t.film_id,
                CASE WHEN mw.seats_midweek IS NULL THEN NULL
@@ -356,51 +400,72 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14) {
         // Re-rank with tie-breakers (unchanged)
         await client.query(
             `
-      WITH w AS (
-        SELECT start_date, end_date FROM weekends WHERE id = $1
-      ),
-      films AS (
-        SELECT DISTINCT r.film_id FROM revenues r WHERE r.weekend_id = $1
-      ),
-      first_flags AS (
-        SELECT f.film_id,
-               NOT EXISTS (
-                 SELECT 1 FROM showings ss, w
-                 WHERE ss.movie_id = f.film_id AND ss.date < w.start_date
-               ) AS is_first
-        FROM films f
-      ),
-      show_counts AS (
-        SELECT f.film_id, COUNT(s.*)::int AS show_count
-        FROM films f
-        JOIN w ON TRUE
-        LEFT JOIN first_flags ff ON ff.film_id = f.film_id
-        LEFT JOIN showings s
-          ON s.movie_id = f.film_id
-         AND ( s.date BETWEEN w.start_date AND w.end_date
-               OR (s.date = w.start_date - INTERVAL '1 day' AND ff.is_first) )
-        GROUP BY f.film_id
-      ),
-      ranked AS (
-        SELECT r.film_id, r.weekend_id,
-               RANK() OVER (
-                 PARTITION BY r.weekend_id
-                 ORDER BY r.revenue_qc DESC NULLS LAST,
-                          COALESCE(sc.show_count,0) DESC,
-                          r.cumulatif_qc_to_date DESC NULLS LAST,
-                          r.film_id
-               ) AS r
-        FROM revenues r
-        LEFT JOIN show_counts sc ON sc.film_id = r.film_id
-        WHERE r.weekend_id = $1
-      )
-      UPDATE revenues r
-      SET rank = rk.r
-      FROM ranked rk
-      WHERE r.film_id = rk.film_id
-        AND r.weekend_id = rk.weekend_id
-        AND r.weekend_id = $1;
-      `,
+                WITH totals AS (
+                    SELECT
+                        f.film_id,
+                        r.weekend_id,
+                        COALESCE(
+                                (SELECT r2.revenue_qc::numeric
+                                 FROM revenues r2
+                                 WHERE r2.film_id = f.film_id
+                                   AND r2.weekend_id = r.weekend_id
+                                   AND r2.data_source = 'cinoche'
+                                 LIMIT 1),
+                                (SELECT r3.revenue_qc::numeric
+                                 FROM revenues r3
+                                 WHERE r3.film_id = f.film_id
+                                   AND r3.weekend_id = r.weekend_id
+                                   AND r3.data_source = 'estimate'
+                                 LIMIT 1)
+                        ) AS weekend_total
+                    FROM (SELECT DISTINCT film_id FROM revenues WHERE weekend_id = $1) f
+                             CROSS JOIN LATERAL (SELECT $1::int AS weekend_id) r
+                ),
+                     w AS (
+                         SELECT start_date, end_date FROM weekends WHERE id = $1
+                     ),
+                     first_flags AS (
+                         SELECT t.film_id,
+                                NOT EXISTS (
+                                    SELECT 1 FROM showings ss, w
+                                    WHERE ss.movie_id = t.film_id AND ss.date < w.start_date
+                                ) AS is_first
+                         FROM (SELECT DISTINCT film_id FROM revenues WHERE weekend_id = $1) t
+                     ),
+                     show_counts AS (
+                         SELECT t.film_id, COUNT(s.*)::int AS show_count
+                         FROM (SELECT DISTINCT film_id FROM revenues WHERE weekend_id = $1) t
+                                  JOIN w ON TRUE
+                                  LEFT JOIN first_flags ff ON ff.film_id = t.film_id
+                                  LEFT JOIN showings s
+                                            ON s.movie_id = t.film_id
+                                                AND (
+                                                   s.date BETWEEN w.start_date AND w.end_date
+                                                       OR (s.date = w.start_date - INTERVAL '1 day' AND ff.is_first)
+                                                   )
+                         GROUP BY t.film_id
+                     ),
+                     ranked AS (
+                         SELECT
+                             t.film_id,
+                             $1::int AS weekend_id,
+                             RANK() OVER (
+                                 ORDER BY t.weekend_total DESC NULLS LAST,
+                                     COALESCE(sc.show_count,0) DESC,
+                                     t.film_id
+                                 ) AS r
+                         FROM totals t
+                                  LEFT JOIN show_counts sc ON sc.film_id = t.film_id
+                     )
+                UPDATE revenues r
+                SET rank = rk.r
+                FROM ranked rk
+                WHERE r.weekend_id = rk.weekend_id
+                  AND r.film_id = rk.film_id
+                  AND r.weekend_id = $1;
+
+
+            `,
             [weekendId]
         );
 

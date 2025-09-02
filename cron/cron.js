@@ -46,5 +46,6 @@ const weekendId = getWeekendId_YYYYWW(endISO);
 
 // $14 default; change if you want to pass a param
 await insertWeekendEstimates(weekendId, 14);
-console.log(`✅ Weekend estimates inserted for ${weekendId}`);
+
+
 
