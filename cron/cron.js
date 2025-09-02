@@ -14,9 +14,8 @@ function getLastFriday() {
 }
 
 
-
-
 const fridayDate = getLastFriday();
+console.log(fridayDate);
 const html = await getCinocheHtml(fridayDate);
 const qcMap = extractBoxOfficeMap(html, "box-office-qc-box-office");
 const currentYear = new Date().getFullYear();
@@ -45,7 +44,8 @@ const endISO    = addDaysISO(fridayDate, 2);
 const weekendId = getWeekendId_YYYYWW(endISO);
 
 // $14 default; change if you want to pass a param
-await insertWeekendEstimates(weekendId, 14);
+await insertWeekendEstimates(weekendId, 11.5, 0.70);
+
 
 
 

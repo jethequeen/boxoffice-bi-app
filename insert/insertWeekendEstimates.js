@@ -17,7 +17,7 @@ function fridaySundayFromWeekendId(weekendId) {
 }
 
 
-export async function insertWeekendEstimates(weekendId, ticketPrice = 14) {
+export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasScale = 0.70) {
     const client = getClient();
     await client.connect();
 
@@ -313,22 +313,22 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14) {
                    CASE
                        WHEN wk.seats_weekend IS NULL THEN NULL
                        WHEN cf.floor_top10 IS NULL
-                           THEN GREATEST(0, (wk.seats_weekend * $2))::bigint
+                           THEN GREATEST(0, (wk.seats_weekend * $2 * $3))::bigint
                        ELSE
-                           GREATEST(0, LEAST((wk.seats_weekend * $2), cf.floor_top10 - 10))::bigint
+                           GREATEST(0, LEAST((wk.seats_weekend * $2 * $3), cf.floor_top10 - 10))::bigint
                        END AS revenue_weekend
                FROM targets t
                         LEFT JOIN wk_seats     wk USING (film_id)
                         LEFT JOIN cinoche_floor cf ON TRUE
            ),
 
-      midweek_money AS (
-        SELECT t.film_id,
-               CASE WHEN mw.seats_midweek IS NULL THEN NULL
-                    ELSE (mw.seats_midweek * $2)::bigint END AS revenue_midweek
-        FROM targets t
-        LEFT JOIN mw_seats mw USING (film_id)
-      ),
+           midweek_money AS (
+               SELECT t.film_id,
+                      CASE WHEN mw.seats_midweek IS NULL THEN NULL
+                           ELSE (mw.seats_midweek * $2 * $3)::bigint END AS revenue_midweek
+               FROM targets t
+                        LEFT JOIN mw_seats mw USING (film_id)
+           ),
       prev_weekend_rev AS (
         SELECT t.film_id,
                (SELECT r.revenue_qc
@@ -394,7 +394,7 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14) {
       RETURNING film_id;
     `;
 
-        const upsert = await client.query(sql, [weekendId, ticketPrice]);
+        const upsert = await client.query(sql, [weekendId, ticketPrice, biasScale]);
         console.log(`[estimates] Upserted/updated rows: ${upsert.rowCount}`);
 
         // Re-rank with tie-breakers (unchanged)
