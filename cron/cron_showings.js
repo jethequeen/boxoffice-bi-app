@@ -127,8 +127,6 @@ try {
     } finally {
         await db.end();
     }
-
-    console.log(`Done. Processed ${processed}/${films.length} candidate(s).`);
     process.exit(0);
 } catch (e) {
     console.error("Fatal:", e?.message || e);

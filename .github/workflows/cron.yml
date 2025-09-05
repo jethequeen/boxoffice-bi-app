@@ -2,10 +2,10 @@
 
 on:
   schedule:
-    # Run every hour (used for gating by local time below)
-    - cron: '0 * * * *'
-    # Explicitly run every day at 16:00 Québec (20:00 UTC)
-    - cron: '0 20 * * *'
+    # 07:00 America/Toronto in DST (UTC-4)
+    - cron: '0 11 * * *'
+    # 07:00 America/Toronto in standard time (UTC-5)
+    - cron: '0 12 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -13,55 +13,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  run-cron:
+  run-daily:
     runs-on: ubuntu-latest
     steps:
-      - name: Determine mode (America/Toronto)
+      - name: Gate to 07:00 America/Toronto
         id: gate
         shell: bash
         run: |
-          DOW=$(TZ=America/Toronto date +%u)   # Mon=1..Sun=7
-          HOUR=$(TZ=America/Toronto date +%H)  # 00..23
-
-          if [ "$DOW" -eq 4 ] && [ "$HOUR" = "07" ]; then
-            echo "mode=showings" >> "$GITHUB_OUTPUT"
-          # your existing windows:
-          elif { [ "$DOW" -eq 1 ] && [ "$HOUR" -ge 15 ]; } || { [ "$DOW" -eq 2 ] && [ "$HOUR" -le 16 ]; }; then
-            echo "mode=hourly" >> "$GITHUB_OUTPUT"
-          elif [ "$HOUR" -eq 16 ]; then
-            echo "mode=daily" >> "$GITHUB_OUTPUT"
+          HOUR=$(TZ=America/Toronto date +%H)
+          if [ "$HOUR" = "07" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "mode=skip" >> "$GITHUB_OUTPUT"
+            echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Tiny noop step
-        if: steps.gate.outputs.mode == 'skip'
-        run: echo "Outside run window — exiting."
+      - name: Outside window — exit
+        if: steps.gate.outputs.run != 'true'
+        run: echo "Not 07:00 in America/Toronto — exiting."
 
-      - uses: actions/checkout@v3
-        if: steps.gate.outputs.mode != 'skip'
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
 
       - uses: actions/setup-node@v4
-        if: steps.gate.outputs.mode != 'skip'
+        if: steps.gate.outputs.run == 'true'
         with:
           node-version: '20'
           cache: 'npm'
 
       - run: npm ci
-        if: steps.gate.outputs.mode != 'skip'
+        if: steps.gate.outputs.run == 'true'
 
       - name: Create .env
-        if: steps.gate.outputs.mode != 'skip'
+        if: steps.gate.outputs.run == 'true'
         run: |
           echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> .env
           echo "TMDB_API_KEY=${{ secrets.TMDB_API_KEY }}" >> .env
 
-      # existing revenue cron
-      - name: Run cron.js
-        if: steps.gate.outputs.mode == 'hourly' || steps.gate.outputs.mode == 'daily'
-        run: node cron/cron.js
-
-      # NEW: weekly showings job — Thursday 07:00 America/Toronto
+      # Run showings every morning
       - name: Run cron_showings.js
-        if: steps.gate.outputs.mode == 'showings'
+        if: steps.gate.outputs.run == 'true'
         run: node cron/cron_showings.js
+
+      # Run revenues every morning
+      - name: Run cron.js
+        if: steps.gate.outputs.run == 'true'
+        run: node cron/cron.js

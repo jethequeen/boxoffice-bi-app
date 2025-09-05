@@ -131,14 +131,16 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
 
 
           /* ---------- is-first flags (for occupancy + seat estimation) ---------- */
-      first_flags AS (
-        SELECT t.film_id,
-               NOT EXISTS (
-                 SELECT 1 FROM showings ss, w
-                 WHERE ss.movie_id = t.film_id AND ss.date < w.start_date
-               ) AS is_first
-        FROM targets t
-      ),
+           first_flags AS (
+               SELECT t.film_id,
+                      NOT EXISTS (
+                          SELECT 1 FROM showings ss, w
+                          WHERE ss.movie_id = t.film_id
+                            AND ss.date < (w.start_date - INTERVAL '1 day')  -- before Thursday
+                      ) AS is_first
+               FROM targets t
+           ),
+
 
       /* ---------- Weekend base for estimates (Thu-if-first allowed) ---------- */
       wk_base AS (
