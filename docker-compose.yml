@@ -10,6 +10,16 @@ services:
     # optional: set timezone in the container
     environment:
       - TZ=America/Toronto
+      - RESYNC_MIN=180          # 3h
+      - LOOKAHEAD_H=8
+      - BACKPAD_MIN=15          # resilience to restarts (10–40 fine)
+      - FLUSH_MIN=10
+      - FLUSH_BATCH=20
+      - CHECK_DELAY_SEC=780     # 13 min
+      - WINDOW_SEC=60
+      - COMPANY_FILTER=cineplex
+      - QUIET_START=01:00       # if you added the quiet-hours guard
+      - QUIET_END=10:00
     # no ports exposed, since it's a background worker
     # volumes:
     #   - ./logs:/app/logs   # uncomment if you want persistent logs on host

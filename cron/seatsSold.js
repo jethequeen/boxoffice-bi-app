@@ -1,170 +1,196 @@
-﻿// cron/seatsSold_daemon.js
-import dotenv from "dotenv";
+﻿import dotenv from "dotenv";
 dotenv.config();
 
 import { setGlobalDispatcher, Agent } from "undici";
-import { getClient } from "../db/client.js";
+import { neon } from "@neondatabase/serverless";         // HTTP driver for READS
+import { getClient } from "../db/client.js";             // your pg TCP client (WRITES)
 import { upsertSeatsSold, getShowtimesKeyFromTheatreUrl } from "../insert/insertAuditorium_cineplex.js";
 
-/* ---------- HTTP keep-alive for faster fetches ---------- */
+/* ---------------- HTTP keep-alive for external fetches ---------------- */
 setGlobalDispatcher(new Agent({
-    // Tune as you wish; these are conservative
-    connections: 16,          // max concurrent sockets per origin
+    connections: Number(process.env.HTTP_CONN || 16),
     pipelining: 1,
-    keepAliveTimeout: 30_000, // keep TLS warm between calls
+    keepAliveTimeout: 30_000,
 }));
 
-/* ---------- Concurrency limiter (tiny p-limit) ---------- */
-function pLimit(n) {
-    const queue = [];
-    let active = 0;
-    const run = async (fn, resolve, reject) => {
-        active++;
-        try { resolve(await fn()); }
-        catch (e) { reject(e); }
-        finally {
-            active--;
-            if (queue.length) {
-                const [f, r, j] = queue.shift();
-                run(f, r, j);
+/* ---------------- Tiny priority queue (min-heap) ---------------- */
+class MinHeap {
+    constructor(){ this.a=[]; }
+    push(x){ this.a.push(x); this._up(this.a.length-1); }
+    peek(){ return this.a[0] || null; }
+    pop(){ if(!this.a.length) return null; const t=this.a[0], l=this.a.pop();
+        if(this.a.length){ this.a[0]=l; this._down(0); } return t; }
+    _up(i){ for(;i>0;){ const p=(i-1>>1); if(this.a[p].ts<=this.a[i].ts) break;
+        [this.a[p],this.a[i]]=[this.a[i],this.a[p]]; i=p; } }
+    _down(i){ for(;;){ const l=i*2+1, r=l+1; let s=i;
+        if(l<this.a.length && this.a[l].ts<this.a[s].ts) s=l;
+        if(r<this.a.length && this.a[r].ts<this.a[s].ts) s=r;
+        if(s===i) break; [this.a[s],this.a[i]]=[this.a[i],this.a[s]]; i=s; } }
+}
+
+/* ---------------- Config ---------------- */
+const TZ = "America/Toronto";
+const CHECK_DELAY_SEC = Number(process.env.CHECK_DELAY_SEC || 13*60); // start+13m
+const WINDOW_SEC      = Number(process.env.WINDOW_SEC      || 60);    // 60s
+const RESYNC_MIN      = Number(process.env.RESYNC_MIN      || 180);   // 3h
+const LOOKAHEAD_H     = Number(process.env.LOOKAHEAD_H     || 8);
+const BACKPAD_MIN     = Number(process.env.BACKPAD_MIN     || 10);
+const FLUSH_MIN       = Number(process.env.FLUSH_MIN       || 10);
+const FLUSH_BATCH     = Number(process.env.FLUSH_BATCH     || 20);
+const COMPANY_FILTER  = process.env.COMPANY_FILTER || "";  // e.g. "cine entreprise"
+// ---- add near the top with other config
+const QUIET_START = "01:00"; // inclusive
+const QUIET_END   = "10:00"; // exclusive
+
+function inQuietHours(now = new Date()) {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+        timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false
+    });
+    const [{value:HH},, {value:mm}] = fmt.formatToParts(now);
+    const cur = `${HH}:${mm}`;
+    return (cur >= QUIET_START && cur < QUIET_END);
+}
+
+
+// Tag Neon query history
+const sqlRead = neon(`${process.env.DATABASE_URL}?application_name=daemon-seats-read`);
+
+/* ---------------- In-memory state ---------------- */
+const heap   = new MinHeap();     // tasks with trigger time
+const outbox = [];                // params for your existing upsertSeatsSold
+const theaterKeyCache = new Map();// theater_id -> { key, locationId, fetchedAt }
+
+/* ---------------- Helpers ---------------- */
+function fmtLocalDateTime(iso) {
+    const d  = new Date(iso);
+    const df = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year:"numeric", month:"2-digit", day:"2-digit" });
+    const tf = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, hour:"2-digit", minute:"2-digit", hour12:false });
+    const [{value:Y},, {value:M},, {value:D}] = df.formatToParts(d);
+    const [{value:HH},, {value:mm}]           = tf.formatToParts(d);
+    return { local_date: `${Y}-${M}-${D}`, local_time: `${HH}:${mm}` };
+}
+
+/* ---------------- One READ every few hours ---------------- */
+async function syncFromDb() {
+    const rows = await sqlRead/*sql*/`
+    select
+      s.id                          as showing_id,
+      s.movie_id,
+      s.theater_id,
+      coalesce(m.fr_title, m.title) as movie_title,
+      s.start_at,
+      t.theater_api_id              as location_id,
+      t.showings_url                as theatre_url,
+      t.company
+    from showings s
+    join theaters t on t.id = s.theater_id
+    join movies   m on m.id = s.movie_id
+    where t.theater_api_id is not null
+      and s.seats_sold is null
+      and s.start_at between (now() at time zone ${TZ} - interval ${BACKPAD_MIN} minute)
+                         and (now() at time zone ${TZ} + interval ${LOOKAHEAD_H} hour)
+      ${COMPANY_FILTER ? sqlRead`and t.company = ${COMPANY_FILTER}` : sqlRead``}
+    order by s.start_at;
+  `;
+
+    // Precompute showtimes keys per theater (cache for 1h)
+    const now = Date.now();
+    const perTheater = new Map();
+    for (const r of rows) {
+        if (!perTheater.has(r.theater_id)) {
+            const cached = theaterKeyCache.get(r.theater_id);
+            if (cached && (now - cached.fetchedAt) < 60*60*1000) {
+                perTheater.set(r.theater_id, cached);
+            } else {
+                const key = await getShowtimesKeyFromTheatreUrl(r.theatre_url);
+                const val = { key, locationId: r.location_id, fetchedAt: Date.now() };
+                theaterKeyCache.set(r.theater_id, val);
+                perTheater.set(r.theater_id, val);
             }
         }
-    };
-    return (fn) => new Promise((resolve, reject) => {
-        if (active < n) run(fn, resolve, reject);
-        else queue.push([fn, resolve, reject]);
-    });
-}
-const limit = pLimit(Number(process.env.SEATS_CONCURRENCY || 4));
-
-/* ------------------------------------------------------- */
-
-const TZ = "America/Toronto";
-
-// --- timing window config ---
-// We'll scrape a show exactly in the minute after it hits start_at + 14m.
-// If you want a wider pre-close window, increase WINDOW_SEC (e.g., 90).
-const LEAD_IN_SEC = 13 * 60; // 13 minutes after start
-const WINDOW_SEC  = 60;      // 60-second wide window
-
-// --- simple in-memory key cache per theater ---
-const keyCache = new Map(); // theater_id -> { key, fetchedAt, theatreUrl, locationId }
-
-/**
- * Ensure we have a showtimes key for this theater, caching it to avoid many Puppeteer launches.
- */
-async function ensureKeyForTheater(client, theater_id) {
-    const cached = keyCache.get(theater_id);
-    if (cached && Date.now() - cached.fetchedAt < 15 * 60 * 1000) {
-        return cached; // reuse up to 15 minutes; adjust as desired
     }
-    const q = await client.query(
-        `SELECT theater_api_id, showings_url FROM theaters WHERE id = $1 LIMIT 1`,
-        [theater_id]
-    );
-    if (q.rowCount === 0) throw new Error(`theater_id=${theater_id} not found in theaters`);
-    const { theater_api_id: locationId, showings_url: theatreUrl } = q.rows[0];
-    if (!locationId || !theatreUrl) throw new Error(`theater_id=${theater_id} missing api_id/showings_url`);
-    const key = await getShowtimesKeyFromTheatreUrl(theatreUrl);
-    const val = { key, fetchedAt: Date.now(), theatreUrl, locationId };
-    keyCache.set(theater_id, val);
-    return val;
+
+    // Enqueue each showing at start_at + 13m
+    let enq = 0;
+    for (const r of rows) {
+        const { key, locationId } = perTheater.get(r.theater_id);
+        const startMs = new Date(r.start_at).getTime();
+        const trigger = startMs + CHECK_DELAY_SEC*1000;
+        if (trigger >= now - 60*1000) {
+            const { local_date, local_time } = fmtLocalDateTime(r.start_at);
+            heap.push({
+                ts: trigger,
+                windowEnd: trigger + WINDOW_SEC*1000,
+                params: {
+                    movie_id:   r.movie_id,
+                    theater_id: r.theater_id,
+                    movieTitle: r.movie_title,
+                    local_date,
+                    local_time,
+                    locationId,
+                    showtimesKey: key,
+                }
+            });
+            enq++;
+        }
+    }
+    console.log(`[sync] queued ${enq}/${rows.length} shows; heap=${heap.a.length}`);
 }
 
-/**
- * Find *all* showings whose measurement window is "now".
- * Window: [start_at + LEAD_IN_SEC, start_at + LEAD_IN_SEC + WINDOW_SEC)
- * And only Cineplex-mapped theaters, and only if seats_sold is still NULL.
- */
-async function findDueShowings(client) {
-    const q = await client.query(
-        `
-            SELECT
-                s.id                AS showing_id,
-                s.movie_id,
-                s.theater_id,
-                COALESCE(m.fr_title, m.title) AS movie_title,
-                (s.start_at + make_interval(secs => $1))      AS window_start,
-                (s.start_at + make_interval(secs => $1 + $2)) AS window_end,
-                to_char((s.start_at AT TIME ZONE $3), 'YYYY-MM-DD') AS local_date,
-                to_char((s.start_at AT TIME ZONE $3), 'HH24:MI')    AS local_time
-            FROM showings s
-                     JOIN theaters t ON t.id = s.theater_id
-                     JOIN movies   m ON m.id = s.movie_id
-            WHERE t.theater_api_id IS NOT NULL
-              AND s.seats_sold IS NULL
-              AND now() >= (s.start_at + make_interval(secs => $1))
-              AND now() <  (s.start_at + make_interval(secs => $1 + $2))
-            ORDER BY (s.start_at + make_interval(secs => $1)) ASC
-        `,
-        [LEAD_IN_SEC, WINDOW_SEC, TZ]
-    );
-    return q.rows;
+/* ---------------- Minute tick: work from memory; buffer params ---------------- */
+async function tick() {
+    const now = Date.now();
+    let taken = 0;
+    while (heap.peek() && heap.peek().ts <= now) {
+        const task = heap.pop();
+        if (now <= task.windowEnd) {
+            outbox.push(task.params);   // keep your original upsert payload
+            taken++;
+        }
+    }
+    if (taken) console.log(`[tick] queued ${taken} due show(s) for flush`);
 }
 
-/**
- * Process a single showing: ensure key, call upsert.
- */
-async function processShowing(client, row) {
-    const { theater_id, movie_id, movie_title, local_date, local_time } = row;
-    const { key, locationId } = await ensureKeyForTheater(client, theater_id);
+/* ---------------- Batched WRITE using your existing upsertSeatsSold ---------------- */
+async function flush(force=false) {
+    if (!force && outbox.length < FLUSH_BATCH) return;
+    const batch = outbox.splice(0, outbox.length);
+    if (!batch.length) return;
 
-    // Upsert WITHOUT any timing logic inside.
-    return await upsertSeatsSold({
-        pgClient: client,
-        movie_id,
-        theater_id,
-        local_date,
-        local_time,
-        movieTitle: movie_title,
-        locationId,
-        showtimesKey: key,
-    });
-}
-
-async function tickOnce() {
     const client = getClient();
     await client.connect();
-
     try {
-        const due = await findDueShowings(client);
-        if (due.length === 0) {
-            console.log(`[seatsSold] ${new Date().toISOString()}: no due showings in window.`);
-            return;
+        await client.query("begin");
+        // Run sequentially (or small concurrency) with the SAME client
+        for (const p of batch) {
+            try {
+                await upsertSeatsSold({ pgClient: client, ...p });
+            } catch (e) {
+                console.error("[flush] upsertSeatsSold failed:", e.message, "payload:", p);
+            }
         }
-
-        console.log(`[seatsSold] ${new Date().toISOString()}: processing ${due.length} showings...`);
-
-        // Concurrency-limited processing
-        await Promise.all(due.map((row) =>
-            limit(async () => {
-                const t0 = Date.now();
-                try {
-                    const res = await processShowing(client, row);
-                    const ms = Date.now() - t0;
-                    console.log(`[seatsSold] OK ${row.showing_id} (${ms}ms) →`, {
-                        theater_id: res.theater_id,
-                        movie_id: res.movie_id,
-                        screen_id: res.screen_id,
-                        auditorium: res.auditorium,
-                        seats_sold: res.seats_sold,
-                        start_at: res.start_at
-                    });
-                } catch (e) {
-                    console.error(`[seatsSold] FAIL ${row.showing_id}:`, e.message);
-                }
-            })
-        ));
+        await client.query("commit");
+        console.log(`[flush] wrote ${batch.length} item(s) via upsertSeatsSold`);
+    } catch (e) {
+        try { await client.query("rollback"); } catch {}
+        throw e;
     } finally {
-        // Always close the client even when there was nothing to do
         await client.end();
     }
 }
 
-function main() {
-    // Run immediately, then every 60 seconds.
-    tickOnce();
-    setInterval(tickOnce, 60 * 1000);
-}
+/* ---------------- Scheduling ---------------- */
+async function main() {
+    await (inQuietHours() ? Promise.resolve() : syncFromDb());
+    setInterval(() => { if (!inQuietHours()) syncFromDb(); }, RESYNC_MIN * 60 * 1000);
+    setInterval(() => { if (!inQuietHours()) tick(); }, 60 * 1000);
+    setInterval(() => { if (!inQuietHours()) flush(false); }, FLUSH_MIN * 60 * 1000);
 
+    // graceful shutdown
+    const shutdown = async () => { try { await flush(true); } finally { process.exit(0); } };
+    process.on("SIGINT",  shutdown);
+    process.on("SIGTERM", shutdown);
+
+    console.log(`[start] seats daemon: resync=${RESYNC_MIN}m, lookahead=${LOOKAHEAD_H}h, flush=${FLUSH_MIN}m`);
+}
 main();
