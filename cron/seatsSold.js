@@ -4,13 +4,10 @@ dotenv.config();
 
 import { setGlobalDispatcher, Agent } from "undici";
 import { neon } from "@neondatabase/serverless";       // HTTP driver for READS
-import { getClient } from "../db/client.js";           // your pg TCP client (WRITES)
+import { getClient } from "../db/client.js";           // pg TCP client (WRITES)
 import {
     getShowtimesKeyFromTheatreUrl,
-    // ➜ You must implement & export this:
-    //    async function scrapeSeatsOnly({ movieTitle, local_date, local_time, locationId, showtimesKey })
-    //    → { measured_at, seats_remaining, capacity, auditorium, source: 'cineplex' }
-    scrapeSeatsOnly,
+    scrapeSeatsOnly, // returns { measured_at, seats_remaining, capacity|null, auditorium|null }
 } from "../insert/insertAuditorium_cineplex.js";
 
 /* ---------------- HTTP keep-alive for external fetches ---------------- */
@@ -83,18 +80,17 @@ function fmtLocalDateTime(iso) {
     return { local_date: `${Y}-${M}-${D}`, local_time: `${HH}:${mm}` };
 }
 
-// Tag Neon query history for visibility in pg_stat_activity
+// Tag Neon query history
 const sqlRead = neon(`${process.env.DATABASE_URL}?application_name=daemon-seats-read`);
 
 /* ---------------- In-memory state ---------------- */
 const heap         = new MinHeap(); // due tasks
 const measurements = [];            // buffered measurements (for DB flush)
-const failures     = [];            // optional diagnostics
+const failures     = [];            // diagnostics (optional)
 const theaterKeyCache = new Map();  // theater_id -> { key, locationId, fetchedAt }
 
 /* ---------------- Build queue from DB (READ ONLY) ---------------- */
 async function syncFromDb() {
-    // NOTE: keep everything parameterized via neon’s ${} placeholders (no manual $1, $2 …)
     const base = await sqlRead/*sql*/`
     select
       s.id                          as showing_id,
@@ -116,7 +112,7 @@ async function syncFromDb() {
     order by s.start_at;
   `;
 
-    // Precompute showtimes keys per theater (cache for 60m)
+    // Precompute showtimes keys per theater (cache 60m)
     const nowMs = Date.now();
     const perTheater = new Map();
     for (const r of base) {
@@ -133,15 +129,16 @@ async function syncFromDb() {
         }
     }
 
-    // Enqueue each showing at start_at + CHECK_DELAY_SEC (local strings carried for scrape)
+    // Enqueue each showing at start_at + CHECK_DELAY_SEC
     let enq = 0;
     for (const r of base) {
-        const { key, locationId } = perTheater.get(r.theater_id) || {};
-        if (!key || !locationId) continue;
+        const got = perTheater.get(r.theater_id);
+        if (!got) continue;
+        const { key, locationId } = got;
 
         const startMs = new Date(r.start_at).getTime();
         const trigger = startMs + CHECK_DELAY_SEC * 1000;
-        if (trigger >= nowMs - 60*1000) { // don’t re-enqueue very stale
+        if (trigger >= nowMs - 60*1000) {
             const { local_date, local_time } = fmtLocalDateTime(r.start_at);
             heap.push({
                 ts: trigger,
@@ -166,20 +163,21 @@ async function syncFromDb() {
 /* ---------------- Scrape seats (HTTP only; no DB) ---------------- */
 async function measureOne(params) {
     const m = await scrapeSeatsOnly({
-        movieTitle:  params.movieTitle,
-        local_date:  params.local_date,
-        local_time:  params.local_time,
-        locationId:  params.locationId,
+        movieTitle:   params.movieTitle,
+        local_date:   params.local_date,
+        local_time:   params.local_time,
+        locationId:   params.locationId,
         showtimesKey: params.showtimesKey,
     });
     if (!m) return null;
     return {
         showing_id: params.showing_id,
+        theater_id: params.theater_id,
+        auditorium: m.auditorium ?? null,
         measured_at: m.measured_at || new Date().toISOString(),
         seats_remaining: m.seats_remaining ?? null,
-        capacity: m.capacity ?? null,
-        auditorium: m.auditorium ?? null,
-        source: m.source || "cineplex",
+        capacity: m.capacity ?? null, // may be null; we’ll hydrate in flush
+        source: "cineplex",
     };
 }
 
@@ -209,7 +207,7 @@ async function tick() {
     console.log(`[tick] sampled ${due.length} show(s); buffered=${measurements.length}`);
 }
 
-/* ---------------- Batched WRITE (single short transaction) ---------------- */
+/* ---------------- Batched WRITE: direct -> showings.seats_sold ---------------- */
 async function flush(force=false) {
     if (!force && measurements.length < FLUSH_BATCH) return;
     const batch = measurements.splice(0, measurements.length);
@@ -218,23 +216,64 @@ async function flush(force=false) {
     const client = getClient();
     await client.connect();
     try {
+        // 0) Preload showings metadata (screen_id, theater_id, current seat_count if any)
+        const ids = batch.map(b => Number(b.showing_id)).filter(Number.isFinite);
+        const metaRes = await client.query(
+            `select s.id, s.theater_id, s.screen_id, sc.seat_count, sc.name as screen_name
+         from showings s
+         left join screens sc on sc.id = s.screen_id
+        where s.id = any($1::int[])`,
+            [ids]
+        );
+        const metaMap = new Map(metaRes.rows.map(r => [r.id, r]));
+
         await client.query("begin");
 
+        let wrote = 0, skipped = 0;
         for (const m of batch) {
-            // 2) update current snapshot on showings (optional)
-            if (m.capacity != null && m.seats_remaining != null) {
-                const seatsSold = m.capacity - m.seats_remaining;
-                await client.query(`
-          update showings
-             set seats_sold = $1
-           where id = $2
-             and (seats_sold is distinct from $1)
-        `, [seatsSold, m.showing_id]);
+            const meta = metaMap.get(Number(m.showing_id));
+            if (!meta) { skipped++; continue; }
+
+            let screenId = meta.screen_id;
+            let capacity = meta.seat_count ?? null;
+
+            // If we don’t know capacity yet, try to resolve a screen by auditorium name
+            if ((capacity == null || screenId == null) && m.auditorium && m.theater_id) {
+                const guess = await client.query(
+                    `select id, seat_count
+             from screens
+            where theater_id = $1 and (name = $2 or name ilike $3)
+            order by (name = $2) desc, length(name)
+            limit 1`,
+                    [m.theater_id, m.auditorium, `%${m.auditorium}%`]
+                );
+                if (guess.rowCount) {
+                    screenId = screenId ?? guess.rows[0].id;
+                    capacity = capacity ?? guess.rows[0].seat_count ?? null;
+
+                    // attach the screen if the showing didn’t have one yet
+                    if (screenId && meta.screen_id == null) {
+                        await client.query(`update showings set screen_id = $1 where id = $2`, [screenId, m.showing_id]);
+                    }
+                }
             }
+
+            // If we still don’t know capacity or seats_remaining, can’t compute seats_sold
+            if (capacity == null || m.seats_remaining == null) { skipped++; continue; }
+
+            const seatsSold = Math.max(0, Number(capacity) - Number(m.seats_remaining));
+            await client.query(
+                `update showings
+            set seats_sold = $1
+          where id = $2
+            and (seats_sold is distinct from $1)`,
+                [seatsSold, m.showing_id]
+            );
+            wrote++;
         }
 
         await client.query("commit");
-        console.log(`[flush] wrote ${batch.length} measurement(s)`);
+        console.log(`[flush] wrote ${wrote}, skipped ${skipped} (no capacity or no seats_remaining)`);
     } catch (e) {
         try { await client.query("rollback"); } catch {}
         console.error("[flush] transaction failed:", e?.message || e);
