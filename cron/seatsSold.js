@@ -242,26 +242,16 @@ async function flush(force=false) {
             let screenId = meta.screen_id;
             let capacity = meta.seat_count ?? null;
 
-            // If we don’t know capacity yet, try to resolve a screen by auditorium name
-            if ((capacity == null || screenId == null) && m.auditorium && m.theater_id) {
-                const guess = await client.query(
-                    `select id, seat_count
-             from screens
-            where theater_id = $1 and (name = $2 or name ilike $3)
-            order by (name = $2) desc, length(name)
-            limit 1`,
-                    [m.theater_id, m.auditorium, `%${m.auditorium}%`]
-                );
-                if (guess.rowCount) {
-                    screenId = screenId ?? guess.rows[0].id;
-                    capacity = capacity ?? guess.rows[0].seat_count ?? null;
-
-                    // attach the screen if the showing didn’t have one yet
-                    if (screenId && meta.screen_id == null) {
-                        await client.query(`update showings set screen_id = $1 where id = $2`, [screenId, m.showing_id]);
-                    }
+             if ((capacity == null || screenId == null) && m.auditorium && m.theater_id) {
+                   const match = await resolveScreenByAuditorium(client, m.theater_id, m.auditorium);
+                   if (match) {
+                         screenId = screenId ?? match.id;
+                        capacity = capacity ?? (match.seat_count ?? null);
+                         if (screenId && meta.screen_id == null) {
+                               await client.query(`update showings set screen_id = $1 where id = $2`, [screenId, m.showing_id]);
+                             }
+                       }
                 }
-            }
 
             // If we still don’t know capacity or seats_remaining, can’t compute seats_sold
              if (capacity == null || m.seats_remaining == null) {

@@ -26,6 +26,58 @@ const minutesFromHHMM = (hhmm) => {
 };
 const minutesFromDateTimeStr = (s) => minutesFromHHMM(hhmmFrom(s));
 
+// put near top of file (helpers)
+function normalizeAudName(s) {
+    return (s || "")
+        .toLowerCase()
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/\b(salle|aud|auditorium|screen|vip)\b/g, "")
+        .replace(/[#]/g, "")
+        .replace(/\s+/g, "")
+        .replace(/(^|[^\d])0+(\d)/g, "$1$2");
+}
+function extractDigits(s) {
+    const m = (s || "").match(/\d+/g);
+    return m ? m.join("") : "";
+}
+
+async function resolveScreenByAuditorium(client, theater_id, auditoriumRaw) {
+    // 1) exact
+    let res = await client.query(
+        `select id, name, seat_count from screens where theater_id = $1 and name = $2 limit 1`,
+        [theater_id, auditoriumRaw]
+    );
+    if (res.rowCount) return res.rows[0];
+
+    // 2) normalized best pick (same scoring you used before)
+    const all = await client.query(
+        `select id, name, seat_count from screens where theater_id = $1`,
+        [theater_id]
+    );
+    const audNorm = normalizeAudName(auditoriumRaw);
+    const audDigits = extractDigits(auditoriumRaw);
+    let best = null;
+    for (const row of all.rows) {
+        const n = normalizeAudName(row.name);
+        const d = extractDigits(row.name);
+        let score = 3;                     // lower is better
+        if (n === audNorm) score = 0;
+        else if (d && d === audDigits) score = 1;
+        else if (n && audNorm && (n.includes(audNorm) || audNorm.includes(n))) score = 1.5;
+        if (!best || score < best.score || (score === best.score && (row.name || "").length < (best.row.name || "").length)) {
+            best = { row, score };
+        }
+    }
+    if (best && best.score <= 1.5) return best.row;
+
+    // 3) last resort ILIKE
+    res = await client.query(
+        `select id, name, seat_count from screens where theater_id = $1 and name ilike $2 order by length(name) limit 1`,
+        [theater_id, `%${auditoriumRaw}%`]
+    );
+    return res.rowCount ? res.rows[0] : null;
+}
+
 // Flatten Cineplex payload to session candidates
 function flattenShowtimesPayload(json) {
     const out = [];
@@ -83,20 +135,6 @@ function dedupeSessions(cands) {
     return Array.from(byKey.values());
 }
 
-// --- auditorium matching helpers (DB-facing, used by upsert path)
-function normalizeAudName(s) {
-    return (s || "")
-        .toLowerCase()
-        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-        .replace(/\b(salle|aud|auditorium|screen|vip)\b/g, "")
-        .replace(/[#]/g, "")
-        .replace(/\s+/g, "")
-        .replace(/(^|[^\d])0+(\d)/g, "$1$2");
-}
-function extractDigits(s) {
-    const m = (s || "").match(/\d+/g);
-    return m ? m.join("") : "";
-}
 
 /** Get the Ocp-Apim-Subscription-Key by visiting a theatre page once. */
 export async function getShowtimesKeyFromTheatreUrl(theatreUrl) {
