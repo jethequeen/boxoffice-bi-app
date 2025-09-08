@@ -169,6 +169,11 @@ async function measureOne(params) {
         locationId:   params.locationId,
         showtimesKey: params.showtimesKey,
     });
+    if (process.env.LOG_LEVEL === 'debug') {
+        console.log("[measureOne] seatsRemaining(raw,type) →",
+            { raw: m?.seats_remaining, type: typeof m?.seats_remaining, aud: m?.auditorium });
+    }
+
     if (!m) return null;
     return {
         showing_id: params.showing_id,
@@ -259,7 +264,17 @@ async function flush(force=false) {
             }
 
             // If we still don’t know capacity or seats_remaining, can’t compute seats_sold
-            if (capacity == null || m.seats_remaining == null) { skipped++; continue; }
+             if (capacity == null || m.seats_remaining == null) {
+                   console.warn("[flush] skip detail", {
+                         showing_id: m.showing_id,
+                         theater_id: m.theater_id,
+                         auditorium: m.auditorium,
+                         capacity_resolved: capacity,
+                         has_seats_remaining: m.seats_remaining != null,
+                       });
+                +  skipped++;
+                   continue;
+                 }
 
             const seatsSold = Math.max(0, Number(capacity) - Number(m.seats_remaining));
             await client.query(

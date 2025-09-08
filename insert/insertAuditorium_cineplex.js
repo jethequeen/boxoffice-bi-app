@@ -239,14 +239,15 @@ export async function scrapeSeatsOnly({
         showtimesKey,
         wantRuntime,
     });
-
+    const srRaw = info?.seatsRemaining;
+    const srNum = srRaw == null || srRaw === "" ? null : Number(srRaw);
     return {
         measured_at: new Date().toISOString(),
-        seats_remaining: Number.isFinite(info.seatsRemaining) ? Number(info.seatsRemaining) : null,
-        capacity: null,                       // hydrate later in flush()
+         seats_remaining: Number.isNaN(srNum) ? null : srNum,
+        capacity: null, // hydrate later
         auditorium: (info.auditorium || "").trim() || null,
         source: "cineplex",
-    };
+        };
 }
 
 /**
