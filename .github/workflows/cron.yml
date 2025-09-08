@@ -50,9 +50,9 @@ jobs:
           echo "TMDB_API_KEY=${{ secrets.TMDB_API_KEY }}" >> .env
 
       # Run showings every morning
-      # - name: Run cron_showings.js
-      #  if: steps.gate.outputs.run == 'true'
-      #  run: node cron/cron_showings.js
+      - name: Run cron_showings.js
+        if: steps.gate.outputs.run == 'true'
+        run: node cron/cron_showings.js
 
       # Run revenues every morning
       - name: Run cron.js
