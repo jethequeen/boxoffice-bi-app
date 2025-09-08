@@ -44,7 +44,7 @@ const endISO    = addDaysISO(fridayDate, 2);
 const weekendId = getWeekendId_YYYYWW(endISO);
 
 // $14 default; change if you want to pass a param
-await insertWeekendEstimates(weekendId, 11.5, 0.70);
+await insertWeekendEstimates(weekendId, 13, 0.9);
 
 
 

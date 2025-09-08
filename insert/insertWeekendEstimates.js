@@ -155,6 +155,11 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
         WHERE (s.date BETWEEN w.start_date AND w.end_date)
            OR (s.date = w.start_date - INTERVAL '1 day' AND ff.is_first)
       ),
+
+           wk_present AS (
+               SELECT DISTINCT film_id
+               FROM wk_base        
+           ),
       wk_banded AS (
         SELECT *,
                CASE
@@ -363,6 +368,7 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
           wf.average_showing_occupancy::numeric(6,4) AS average_showing_occupancy,
           wf.showings_proportion::numeric(6,4)       AS showings_proportion
         FROM targets t
+        JOIN wk_present      wp  ON wp.film_id = t.film_id
         JOIN weekend_money    wm  USING (film_id)
         JOIN midweek_money    mm  USING (film_id)
         JOIN prev_cumul       pc  USING (film_id)
