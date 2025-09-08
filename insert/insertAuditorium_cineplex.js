@@ -340,7 +340,7 @@ export async function upsertSeatsSold({
     // 3) last resort: legacy ILIKE
     if (res.rowCount === 0) {
         res = await pgClient.query(
-            `SELECT id, name, seat_count FROM screens WHERE theater_id = $1 AND name ILIKE $2 ORDER BY LENGTH(name) ASC LIMIT 1`,
+            `SELECT id, name, seat_count FROM screens WHERE theater_id = $1 AND name ILIKE $2 ORDER BY LENGTH(name) LIMIT 1`,
             [theater_id, `%${auditoriumRaw}%`]
         );
     }
