@@ -2,6 +2,7 @@
 import puppeteer from "puppeteer";
 
 const SHOWTIMES_PREFIX = "https://apis.cineplex.com/prod/cpx/theatrical/api/v1/showtimes";
+const MINUTE_TOLERANCE = Number(process.env.MATCH_TOL_MIN || 5); // ± minutes to accept nearest match
 
 // --- utils ---
 const norm = (s) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -9,7 +10,8 @@ const squish = (s) => norm(s).replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").t
 
 const toMDY = (iso) => {
     const [Y, M, D] = iso.split("-").map(Number);
-    return `${M}/${D}/${Y}`;
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(M)}/${p(D)}/${Y}`;
 };
 
 const hhmmFrom = (s) => {
@@ -17,6 +19,12 @@ const hhmmFrom = (s) => {
     const t = s.includes("T") ? s.split("T")[1] : s;
     return t.slice(0, 5); // HH:MM
 };
+
+const minutesFromHHMM = (hhmm) => {
+    const [h, m] = (hhmm || "00:00").split(":").map(Number);
+    return h * 60 + m;
+};
+const minutesFromDateTimeStr = (s) => minutesFromHHMM(hhmmFrom(s));
 
 // Flatten Cineplex payload to session candidates
 function flattenShowtimesPayload(json) {
@@ -47,43 +55,35 @@ function flattenShowtimesPayload(json) {
 
 // --- dedupe helpers ---
 function sessionKey(r) {
-    // Prefer unique Vista id; fallback to aud+start+film
     return r.vistaSessionId
         ? `v:${r.vistaSessionId}`
         : `k:${(r.auditorium || "").trim()}|${r.showStartDateTimeUtc || r.showStartDateTime || ""}|${r.filmUrl || r.movieName || ""}`;
 }
-
 function areaPriority(areaCode) {
     if (areaCode === "0000000001") return 3; // General Admission
     if (areaCode === "0000000004") return 1; // D-BOX
     return 2; // everything else
 }
-
 function experiencePriority(expTypes) {
     const arr = Array.isArray(expTypes) ? expTypes.map((x) => String(x).toLowerCase()) : [];
     if (arr.some((x) => x.includes("regular"))) return 2;
     if (arr.some((x) => x.includes("d-box") || x.includes("dbox"))) return 1;
     return 0;
 }
-
 function dedupeSessions(cands) {
     const byKey = new Map();
     for (const r of cands) {
         const key = sessionKey(r);
         const prev = byKey.get(key);
-        if (!prev) {
-            byKey.set(key, r);
-            continue;
-        }
-        // prefer GA + "Regular" (represents the full auditorium)
+        if (!prev) { byKey.set(key, r); continue; }
         const prevScore = areaPriority(prev.areaCode) * 100 + experiencePriority(prev.experienceTypes);
-        const nextScore = areaPriority(r.areaCode) * 100 + experiencePriority(r.experienceTypes);
+        const nextScore = areaPriority(r.areaCode)   * 100 + experiencePriority(r.experienceTypes);
         if (nextScore > prevScore) byKey.set(key, r);
     }
     return Array.from(byKey.values());
 }
 
-// --- auditorium matching helpers (DB) ---
+// --- auditorium matching helpers (DB-facing, used by upsert path)
 function normalizeAudName(s) {
     return (s || "")
         .toLowerCase()
@@ -91,7 +91,7 @@ function normalizeAudName(s) {
         .replace(/\b(salle|aud|auditorium|screen|vip)\b/g, "")
         .replace(/[#]/g, "")
         .replace(/\s+/g, "")
-        .replace(/(^|[^\d])0+(\d)/g, "$1$2"); // remove leading zeros before a digit
+        .replace(/(^|[^\d])0+(\d)/g, "$1$2");
 }
 function extractDigits(s) {
     const m = (s || "").match(/\d+/g);
@@ -119,11 +119,34 @@ export async function getShowtimesKeyFromTheatreUrl(theatreUrl) {
     }
 }
 
+/* ---------- internal: fetch & flatten for one day (with a couple fallbacks) ---------- */
+async function fetchShowtimesDay({ locationId, dateISO, lang, showtimesKey }) {
+    const headers = { Accept: "application/json", "Ocp-Apim-Subscription-Key": showtimesKey };
+    const urls = [
+        // what we observed most commonly
+        `${SHOWTIMES_PREFIX}?language=${encodeURIComponent(lang)}&locationId=${encodeURIComponent(String(locationId))}&date=${encodeURIComponent(toMDY(dateISO))}`,
+        // try ISO date if needed
+        `${SHOWTIMES_PREFIX}?language=${encodeURIComponent(lang)}&locationId=${encodeURIComponent(String(locationId))}&date=${encodeURIComponent(dateISO)}`
+    ];
+
+    for (const url of urls) {
+        const res = await fetch(url, { headers });
+        if (!res.ok) continue;
+        const payload = await res.json();
+        const blocks = Array.isArray(payload) ? payload : [payload];
+        let all = [];
+        for (const blk of blocks) all = all.concat(flattenShowtimesPayload(blk));
+        all = dedupeSessions(all);
+        // If this call returns anything for that date, use it.
+        if (all.some(r => (r.showStartDateTime || "").slice(0, 10) === dateISO)) return all;
+    }
+    return []; // nothing usable
+}
+
 /**
  * Fetch Cineplex showtimes once, then:
- *  - filter by date & exact HH:MM
- *  - de-dup exact same show
- *  - if multiple remain, narrow by title; if still multiple and same auditorium, pick the first
+ *  - filter by date & (prefer exact HH:MM; else nearest within ±MINUTE_TOLERANCE)
+ *  - tie-break by runtime (±3) then by fuzzy title, then GA preference
  */
 export async function fetchSeatsForShowtime({
                                                 locationId,
@@ -136,63 +159,57 @@ export async function fetchSeatsForShowtime({
                                             }) {
     if (!showtimesKey) throw new Error("showtimesKey required");
 
-    const url = `${SHOWTIMES_PREFIX}?language=${encodeURIComponent(lang)}&locationId=${encodeURIComponent(
-        String(locationId)
-    )}&date=${encodeURIComponent(toMDY(date))}`;
+    // base try
+    let all = await fetchShowtimesDay({ locationId, dateISO: date, lang, showtimesKey });
 
-    const res = await fetch(url, {
-        headers: { Accept: "application/json", "Ocp-Apim-Subscription-Key": showtimesKey },
-    });
-    if (!res.ok) throw new Error(`Showtimes fetch failed: ${res.status}`);
-
-    const payload = await res.json();
-    const blocks = Array.isArray(payload) ? payload : [payload];
-
-    // Flatten + dedupe globally
-    let all = [];
-    for (const blk of blocks) all = all.concat(flattenShowtimesPayload(blk));
-    all = dedupeSessions(all);
+    // language fallback if needed
+    if (all.length === 0 && lang === "fr") {
+        all = await fetchShowtimesDay({ locationId, dateISO: date, lang: "en", showtimesKey });
+    }
 
     const todays = all.filter((r) => (r.showStartDateTime || "").slice(0, 10) === date);
     const wantHHMM = showtime.slice(0, 5);
-
-    // Exact minute filter
     let atMinute = todays.filter((r) => hhmmFrom(r.showStartDateTime) === wantHHMM);
+
+    // If no exact match, snap to nearest within ±MINUTE_TOLERANCE
+    if (atMinute.length === 0 && MINUTE_TOLERANCE > 0) {
+        const wantMin = minutesFromHHMM(wantHHMM);
+        const within = todays
+            .map(r => ({ r, diff: Math.abs(minutesFromDateTimeStr(r.showStartDateTime) - wantMin) }))
+            .filter(x => x.diff <= MINUTE_TOLERANCE)
+            .sort((a,b) => a.diff - b.diff)
+            .map(x => x.r);
+        if (within.length) atMinute = within;
+    }
+
     if (atMinute.length === 0) {
-        throw new Error(
-            `match-failed ${JSON.stringify({ status: "NO_MATCH_AT_TIME", theatreId: locationId, wantTime: wantHHMM })}`
-        );
+        throw new Error(`match-failed ${JSON.stringify({ status: "NO_MATCH_AT_TIME", theatreId: locationId, wantTime: wantHHMM })}`);
     }
 
-    // --- FIRST tie-break: runtime (±3 min). Only apply if we have a target and any runtimes exist.
+    // FIRST tie-break: runtime (±3)
     if (Number.isFinite(wantRuntime) && atMinute.some(r => Number.isFinite(r.runtimeInMinutes))) {
-        const withRt   = atMinute.filter(r => Number.isFinite(r.runtimeInMinutes));
-        const byRt     = withRt.filter(r => Math.abs(r.runtimeInMinutes - wantRuntime) <= 3);
-        if (byRt.length === 1) {
-            atMinute = byRt;
-        } else if (byRt.length > 1) {
-            atMinute = byRt; // keep narrowed set and continue tie-breaks
-        }
-        // if byRt.length === 0, keep original atMinute (don’t over-filter)
+        const withRt = atMinute.filter(r => Number.isFinite(r.runtimeInMinutes));
+        const byRt   = withRt.filter(r => Math.abs(r.runtimeInMinutes - wantRuntime) <= 3);
+        if (byRt.length === 1)       atMinute = byRt;
+        else if (byRt.length > 1)    atMinute = byRt;
     }
 
-    // SECOND tie-break: title (loose)
+    // SECOND: title (loose)
     if (atMinute.length > 1 && movieTitle) {
-        const want = (movieTitle || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-        const wantLoose = want.replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+        const want = norm(movieTitle);
+        const wantLoose = squish(movieTitle);
         const narrowed = atMinute.filter(r => {
-            const n = (r.movieName || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-            const sq = n.replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+            const n = norm(r.movieName);
+            const sq = squish(r.movieName);
             return n.includes(want) || sq.includes(wantLoose);
         });
         if (narrowed.length > 0) atMinute = narrowed;
     }
 
-    // THIRD: if same auditorium, take first (duplicates like GA/DBOX views of same show)
+    // THIRD: auditorium grouping/GA preference
     if (atMinute.length > 1) {
         const audSet = new Set(atMinute.map(r => (r.auditorium || "").trim()));
         if (audSet.size === 1) return atMinute[0];
-        // otherwise prefer GA areaCode then first
         const ga = atMinute.find(r => r.areaCode === "0000000001");
         if (ga) return ga;
     }
@@ -201,21 +218,50 @@ export async function fetchSeatsForShowtime({
 }
 
 /**
- * Upsert seats_sold into `showings` (NO time gating).
- * - Resolves screen capacity from `screens` via (theater_id, name) with normalization.
- * - start_at prefers Cineplex UTC instant when available.
+ * NEW: scrape-only API for the daemon.
+ * Returns a measurement object (no DB writes).
  */
-export async function upsertSeatsSold({
-                                          pgClient,          // connected pg Client
-                                          movie_id,
-                                          theater_id,
-                                          local_date,        // "YYYY-MM-DD"
-                                          local_time,        // "HH:MM"
+export async function scrapeSeatsOnly({
                                           movieTitle,
-                                          // Either pass these:
+                                          local_date,  // "YYYY-MM-DD"
+                                          local_time,  // "HH:MM"
                                           locationId,
                                           showtimesKey,
-                                          // Or let it read from theaters table and sniff:
+                                          lang = "fr",
+                                          wantRuntime = null,
+                                      }) {
+    const info = await fetchSeatsForShowtime({
+        locationId,
+        date: local_date,
+        movieTitle,
+        showtime: local_time,
+        lang,
+        showtimesKey,
+        wantRuntime,
+    });
+
+    return {
+        measured_at: new Date().toISOString(),
+        seats_remaining: Number.isFinite(info.seatsRemaining) ? Number(info.seatsRemaining) : null,
+        capacity: null,                       // hydrate later in flush()
+        auditorium: (info.auditorium || "").trim() || null,
+        source: "cineplex",
+    };
+}
+
+/**
+ * (UNCHANGED) Upsert seats_sold directly into DB.
+ * You can keep using this in other places; the daemon now prefers scrape+flush.
+ */
+export async function upsertSeatsSold({
+                                          pgClient,
+                                          movie_id,
+                                          theater_id,
+                                          local_date,
+                                          local_time,
+                                          movieTitle,
+                                          locationId,
+                                          showtimesKey,
                                           theatreUrl,
                                           lang = "fr",
                                       }) {
@@ -238,20 +284,16 @@ export async function upsertSeatsSold({
         }
     }
 
-    // Fetch movie runtime (best-effort; works regardless of column naming)
+    // Fetch movie runtime (best-effort)
     let wantRuntime = null;
     try {
         const mq = await pgClient.query(`SELECT * FROM movies WHERE id = $1 LIMIT 1`, [movie_id]);
         if (mq.rowCount) {
             const r = mq.rows[0];
-            // Try common column names in order; keep first valid positive number
             const candidates = [r.runtime_minutes, r.runtime, r.length_minutes, r.duration_minutes, r.duration];
-            for (const v of candidates) {
-                const n = Number(v);
-                if (Number.isFinite(n) && n > 0) { wantRuntime = n; break; }
-            }
+            for (const v of candidates) { const n = Number(v); if (Number.isFinite(n) && n > 0) { wantRuntime = n; break; } }
         }
-    } catch (_) { /* ignore – runtime is optional */ }
+    } catch (_) {}
 
     // Fetch + match one session
     const info = await fetchSeatsForShowtime({
@@ -264,9 +306,7 @@ export async function upsertSeatsSold({
         wantRuntime,
     });
 
-    if (info.seatsRemaining == null) {
-        throw new Error("seatsRemaining is null in Cineplex payload");
-    }
+    if (info.seatsRemaining == null) throw new Error("seatsRemaining is null in Cineplex payload");
 
     // Match screen & capacity (with normalization)
     const auditoriumRaw = (info.auditorium || "").trim();
@@ -281,10 +321,7 @@ export async function upsertSeatsSold({
 
     // 2) normalized best pick
     if (res.rowCount === 0) {
-        const all = await pgClient.query(
-            `SELECT id, name, seat_count FROM screens WHERE theater_id = $1`,
-            [theater_id]
-        );
+        const all = await pgClient.query(`SELECT id, name, seat_count FROM screens WHERE theater_id = $1`, [theater_id]);
         let best = null;
         for (const row of all.rows) {
             const n = normalizeAudName(row.name);
@@ -293,14 +330,11 @@ export async function upsertSeatsSold({
             if (n === audNorm) score = 0;
             else if (d && d === audDigits) score = 1;
             else if (n && audNorm && (n.includes(audNorm) || audNorm.includes(n))) score = 1.5;
-
             if (!best || score < best.score || (score === best.score && (row.name || "").length < (best.row.name || "").length)) {
                 best = { row, score };
             }
         }
-        if (best && best.score <= 1.5) {
-            res = { rowCount: 1, rows: [best.row] };
-        }
+        if (best && best.score <= 1.5) res = { rowCount: 1, rows: [best.row] };
     }
 
     // 3) last resort: legacy ILIKE
@@ -310,17 +344,13 @@ export async function upsertSeatsSold({
             [theater_id, `%${auditoriumRaw}%`]
         );
     }
-
-    if (res.rowCount === 0) {
-        throw new Error(`No screen matched auditorium="${auditoriumRaw}" in theater_id=${theater_id}`);
-    }
+    if (res.rowCount === 0) throw new Error(`No screen matched auditorium="${auditoriumRaw}" in theater_id=${theater_id}`);
 
     const screen_id = res.rows[0].id;
     const capacity  = Number(res.rows[0].seat_count) || 0;
     const remaining = Number(info.seatsRemaining);
     const seats_sold = Math.max(0, capacity - remaining);
 
-    // Prefer Cineplex UTC (string is UTC without 'Z')
     const start_at = info.showStartDateTimeUtc
         ? new Date(info.showStartDateTimeUtc + "Z").toISOString()
         : `${local_date}T${local_time}:00Z`;
