@@ -17,7 +17,6 @@ services:
       - FLUSH_BATCH=100
       - CHECK_DELAY_SEC=780     # 13 min
       - WINDOW_SEC=60
-      - COMPANY_FILTER=cineplex
       - QUIET_START=01:00       # if you added the quiet-hours guard
       - QUIET_END=10:00
     # no ports exposed, since it's a background worker
