@@ -37,7 +37,6 @@ const LOOKAHEAD_H     = Number(process.env.LOOKAHEAD_H     || 8);
 const BACKPAD_MIN     = Number(process.env.BACKPAD_MIN     || 10);
 const FLUSH_MIN       = Number(process.env.FLUSH_MIN       || 10);
 const FLUSH_BATCH     = Number(process.env.FLUSH_BATCH     || 20);
-const COMPANY_FILTER  = process.env.COMPANY_FILTER || "";  // e.g. "cine entreprise"
 // ---- add near the top with other config
 const QUIET_START = "01:00"; // inclusive
 const QUIET_END   = "10:00"; // exclusive
@@ -70,37 +69,48 @@ function fmtLocalDateTime(iso) {
     return { local_date: `${Y}-${M}-${D}`, local_time: `${HH}:${mm}` };
 }
 
-/* ---------------- One READ every few hours ---------------- */
 async function syncFromDb() {
+    // Build the window as timestamptz
     const rows = await sqlRead/*sql*/`
         select
             s.id                          as showing_id,
             s.movie_id,
             s.theater_id,
             coalesce(m.fr_title, m.title) as movie_title,
-            s.start_at,
+            s.start_at,                           -- timestamptz
             t.theater_api_id              as location_id,
-            t.showings_url                as theatre_url,
-            t.company
+            t.showings_url                as theatre_url
         from showings s
                  join theaters t on t.id = s.theater_id
                  join movies   m on m.id = s.movie_id
         where t.theater_api_id is not null
           and s.seats_sold is null
-          and s.start_at between (now() at time zone ${TZ} - make_interval(mins => ${BACKPAD_MIN}))
-            and (now() at time zone ${TZ} + make_interval(hours => ${LOOKAHEAD_H}))
-            ${COMPANY_FILTER ? sqlRead`and t.company = ${COMPANY_FILTER}` : sqlRead``}
+          and s.start_at between
+            (now() - (${BACKPAD_MIN}::int * interval '1 minute'))
+            and (now() + (${LOOKAHEAD_H}::int * interval '1 hour'))
         order by s.start_at;
     `;
 
+    if (rows.length === 0) {
+        // Helpful one-shot debug to confirm there *are* rows in the window
+        const dbg = await sqlRead/*sql*/`
+      select count(*)::int as n_all,
+             count(*) filter (where s.seats_sold is null)::int as n_null
+      from showings s
+      where s.start_at between
+              (now() - (${BACKPAD_MIN}::int * interval '1 minute'))
+          and (now() + (${LOOKAHEAD_H}::int * interval '1 hour'));
+    `;
+        console.log('[sync][debug] window counts:', dbg[0]);
+    }
 
     // Precompute showtimes keys per theater (cache for 1h)
-    const now = Date.now();
+    const nowMs = Date.now();
     const perTheater = new Map();
     for (const r of rows) {
         if (!perTheater.has(r.theater_id)) {
             const cached = theaterKeyCache.get(r.theater_id);
-            if (cached && (now - cached.fetchedAt) < 60*60*1000) {
+            if (cached && (nowMs - cached.fetchedAt) < 60 * 60 * 1000) {
                 perTheater.set(r.theater_id, cached);
             } else {
                 const key = await getShowtimesKeyFromTheatreUrl(r.theatre_url);
@@ -111,32 +121,33 @@ async function syncFromDb() {
         }
     }
 
-    // Enqueue each showing at start_at + 13m
+    // Enqueue each showing at start_at + 13m (fmt local TZ only for the API call)
     let enq = 0;
     for (const r of rows) {
         const { key, locationId } = perTheater.get(r.theater_id);
         const startMs = new Date(r.start_at).getTime();
-        const trigger = startMs + CHECK_DELAY_SEC*1000;
-        if (trigger >= now - 60*1000) {
+        const trigger = startMs + CHECK_DELAY_SEC * 1000;
+        if (trigger >= nowMs - 60 * 1000) {
             const { local_date, local_time } = fmtLocalDateTime(r.start_at);
             heap.push({
                 ts: trigger,
-                windowEnd: trigger + WINDOW_SEC*1000,
+                windowEnd: trigger + WINDOW_SEC * 1000,
                 params: {
-                    movie_id:   r.movie_id,
+                    movie_id: r.movie_id,
                     theater_id: r.theater_id,
                     movieTitle: r.movie_title,
                     local_date,
                     local_time,
                     locationId,
                     showtimesKey: key,
-                }
+                },
             });
             enq++;
         }
     }
     console.log(`[sync] queued ${enq}/${rows.length} shows; heap=${heap.a.length}`);
 }
+
 
 /* ---------------- Minute tick: work from memory; buffer params ---------------- */
 async function tick() {
