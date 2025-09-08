@@ -73,25 +73,26 @@ function fmtLocalDateTime(iso) {
 /* ---------------- One READ every few hours ---------------- */
 async function syncFromDb() {
     const rows = await sqlRead/*sql*/`
-    select
-      s.id                          as showing_id,
-      s.movie_id,
-      s.theater_id,
-      coalesce(m.fr_title, m.title) as movie_title,
-      s.start_at,
-      t.theater_api_id              as location_id,
-      t.showings_url                as theatre_url,
-      t.company
-    from showings s
-    join theaters t on t.id = s.theater_id
-    join movies   m on m.id = s.movie_id
-    where t.theater_api_id is not null
-      and s.seats_sold is null
-      and s.start_at between (now() at time zone ${TZ} - interval ${BACKPAD_MIN} minute)
-                         and (now() at time zone ${TZ} + interval ${LOOKAHEAD_H} hour)
-      ${COMPANY_FILTER ? sqlRead`and t.company = ${COMPANY_FILTER}` : sqlRead``}
-    order by s.start_at;
-  `;
+        select
+            s.id                          as showing_id,
+            s.movie_id,
+            s.theater_id,
+            coalesce(m.fr_title, m.title) as movie_title,
+            s.start_at,
+            t.theater_api_id              as location_id,
+            t.showings_url                as theatre_url,
+            t.company
+        from showings s
+                 join theaters t on t.id = s.theater_id
+                 join movies   m on m.id = s.movie_id
+        where t.theater_api_id is not null
+          and s.seats_sold is null
+          and s.start_at between (now() at time zone ${TZ} - make_interval(mins => ${BACKPAD_MIN}))
+            and (now() at time zone ${TZ} + make_interval(hours => ${LOOKAHEAD_H}))
+            ${COMPANY_FILTER ? sqlRead`and t.company = ${COMPANY_FILTER}` : sqlRead``}
+        order by s.start_at;
+    `;
+
 
     // Precompute showtimes keys per theater (cache for 1h)
     const now = Date.now();
