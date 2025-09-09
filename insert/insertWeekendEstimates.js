@@ -368,7 +368,7 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
           wf.average_showing_occupancy::numeric(6,4) AS average_showing_occupancy,
           wf.showings_proportion::numeric(6,4)       AS showings_proportion
         FROM targets t
-        JOIN wk_present      wp  ON wp.film_id = t.film_id
+        JOIN wk_present      wp   USING (film_id)
         JOIN weekend_money    wm  USING (film_id)
         JOIN midweek_money    mm  USING (film_id)
         JOIN prev_cumul       pc  USING (film_id)
