@@ -42,9 +42,15 @@ for (const [title, qcData] of qcMap.entries()) {
 
 const endISO    = addDaysISO(fridayDate, 2);
 const weekendId = getWeekendId_YYYYWW(endISO);
+console.log(weekendId)
 
 // $14 default; change if you want to pass a param
 await insertWeekendEstimates(weekendId, 13, 0.9);
+
+// also compute next weekend so Thursday previews show up there
+const fridayNext   = addDaysISO(fridayDate, 7);
+const weekendNext  = getWeekendId_YYYYWW(addDaysISO(fridayNext, 2));
+await insertWeekendEstimates(weekendNext, 13, 0.9);
 
 
 

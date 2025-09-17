@@ -8,6 +8,7 @@ import { insertMetadata } from "../insert/insertMetadata.js";
 import { insertShowingsForMovie } from "../insert/insertShowings.js";
 import { searchMovie } from "../insert/searchMovie.js";
 import { getClient } from "../db/client.js";
+import {ensureMovieIdOrPlaceholder} from "../helpers/movieIDorPlaceHolder.js";
 
 // ---------- .env loading ----------
 const __filename = fileURLToPath(import.meta.url);
@@ -80,42 +81,17 @@ try {
 
 
                 const yearHint = yearFromBlocks(c.blocks);
-                let match = null;
+                const film_id = await ensureMovieIdOrPlaceholder(db, {
+                    title: c.title,
+                    yearHint,
+                    baseFilmUrl,
+                    extraQueries: [slugTitle, ...langTitles].filter(Boolean)
+                });
 
-                if (yearHint) {
-                    const { rows } = await db.query(
-                        `SELECT id
-                           FROM movies
-                          WHERE (fr_title = $1 OR title = $1)
-                            AND release_date BETWEEN ($2||'-01-01')::date AND ($3||'-12-31')::date
-                          ORDER BY popularity DESC NULLS LAST
-                          LIMIT 1`,
-                        [c.title, yearHint - 1, yearHint + 1]
-                    );
-                    if (rows[0]) {
-                        match = { id: rows[0].id };
-                    }
-                }
-
-                if (!match) {
-                    for (const q of queries) {
-                        match = await searchMovie(q, yearHint, { strict: true, tol: 1, allowNoYearFallback: false })
-                            || await searchMovie(q, yearHint-1, { strict: true, tol: 0 })
-                            || await searchMovie(q, yearHint+1, { strict: true, tol: 0 });
-                        if (match?.id) break;
-                    }
-                }
-                if (!match?.id) {
-                    console.log(`⚠️ No TMDB match (year-strict) for ${c.title} (${yearHint})`);
-                    continue;
-                }
-
-                const tmdbId = match.id;
-                await insertMetadata(tmdbId, c.title);
-                const added = await insertShowingsForMovie(tmdbId, c.blocks);
-
+                const added = await insertShowingsForMovie(film_id, c.blocks);
                 const tag = added > 0 ? "ADD" : "OK";
                 console.log(`[${tag}] ${c.title} — total week showings: ${c.total} (inserted ${added})`);
+
 
                 processed++;
                 if (SLEEP_MS > 0) await sleep(SLEEP_MS);
