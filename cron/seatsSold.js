@@ -1,17 +1,17 @@
-﻿// cron/seatsSold_heap_daemon.js
-// DB resync every 3h → in-memory queue → minute tick scrapes (no DB) → batch FLUSH with robust upserts.
-
-import { setGlobalDispatcher, Agent } from "undici";
+﻿import { setGlobalDispatcher, Agent } from "undici";
 import { getClient } from "../db/client.js";
-import { getShowtimesKeyFromTheatreUrl, scrapeSeatsOnly, upsertSeatsSoldFromMeasurement } from "../insert/insertAuditorium_cineplex.js";
+import {
+    getShowtimesKeyFromTheatreUrl,
+    scrapeSeatsOnly as scrapeSeatsOnlyCineplex,
+    upsertSeatsSoldFromMeasurement
+} from "../insert/insertAuditorium_cineplex.js";
+import { cinemathequeScrapeSeats } from "../insert/seats_sold_Cinematheque_quebecoise.js";
 
 /* ---------- Hardcoded config (no envs) ---------- */
 const TZ               = "America/Toronto";
 const RESYNC_MIN       = 180;     // read DB every 3h to rebuild queue
 const LOOKAHEAD_H      = 8;       // queue shows up to 8h ahead
 const BACKPAD_MIN      = 15;      // include shows that started in the last 15min
-const CHECK_DELAY_SEC  = 13*60;   // scrape at start_at + 13m
-const WINDOW_SEC       = 180;     // accept within this window
 const FLUSH_MIN        = 60;      // flush every 60 min
 const FLUSH_BATCH      = 100;     // or when we have 100+ measurements
 const SCRAPE_CONC      = 6;       // scraping concurrency
@@ -20,6 +20,17 @@ const KEY_CACHE_TTL_MS = 60*60*1000; // 60min
 const QUIET_START      = "01:00"; // inclusive
 const QUIET_END        = "10:00"; // exclusive
 const LOG_LEVEL        = "info";  // "debug" for chattier logs
+
+/** Provider-specific timing (seconds).
+ *  trigger = show.start_at + offsetSec
+ *  accept window: [trigger .. trigger + windowAfterSec]
+ */
+const PROVIDER_TIMING = {
+    cinematheque: { offsetSec: -3 * 60,  windowAfterSec: 2 * 60 },  // run 3m before; accept another 2 minutes
+    cineplex:     { offsetSec: 12 * 60,  windowAfterSec: 3 * 60 },  // run 12m after; accept another 3 minutes
+};
+// default fallback if a theatre doesn’t match either bucket
+const DEFAULT_TIMING = { offsetSec: 12 * 60, windowAfterSec: 5 * 60 };
 
 /* ---------- HTTP keep-alive ---------- */
 setGlobalDispatcher(new Agent({ connections: 16, pipelining: 1, keepAliveTimeout: 30_000 }));
@@ -67,55 +78,70 @@ async function syncFromDb() {
     await client.connect();
     try {
         const q = await client.query(`
-      SELECT
-        s.id                          AS showing_id,
-        s.movie_id,
-        s.theater_id,
-        COALESCE(m.fr_title, m.title) AS movie_title,
-        s.start_at,
-        t.theater_api_id              AS location_id,
-        t.showings_url                AS theatre_url
-      FROM showings s
-      JOIN theaters t ON t.id = s.theater_id
-      JOIN movies   m ON m.id = s.movie_id
-      WHERE t.theater_api_id IS NOT NULL
-        AND s.seats_sold IS NULL
-        AND s.start_at BETWEEN (now() - make_interval(mins => $1))
-                           AND (now() + make_interval(hours => $2))
-      ORDER BY s.start_at
-    `, [BACKPAD_MIN, LOOKAHEAD_H]);
+            SELECT
+                s.id                          AS showing_id,
+                s.movie_id,
+                s.theater_id,
+                COALESCE(m.fr_title, m.title) AS movie_title,
+                s.start_at,
+                t.theater_api_id              AS location_id,
+                t.showings_url                AS theatre_url,
+                t.name                        AS theater_name
+            FROM showings s
+                     JOIN theaters t ON t.id = s.theater_id
+                     JOIN movies   m ON m.id = s.movie_id
+            WHERE s.seats_sold IS NULL
+              AND s.start_at BETWEEN (now() - make_interval(mins => $1))
+                AND (now() + make_interval(hours => $2))
+            ORDER BY s.start_at
+        `, [BACKPAD_MIN, LOOKAHEAD_H]);
 
-        // prefetch keys
+        // prefetch Cineplex keys where applicable
         const nowMs = Date.now();
+        let enq = 0;
         for (const r of q.rows) {
-            const cached = theaterKeyCache.get(r.theater_id);
-            if (!cached || (nowMs - cached.fetchedAt) > KEY_CACHE_TTL_MS) {
-                const key = await getShowtimesKeyFromTheatreUrl(r.theatre_url);
-                theaterKeyCache.set(r.theater_id, { key, locationId: r.location_id, fetchedAt: Date.now() });
-            }
-        }
+            const isCinematheque = /cinémath[eè]que|cinematheque/i.test(r.theater_name || "");
+            const provider = isCinematheque ? "cinematheque" : "cineplex";
 
-        // enqueue
-        let enq=0;
-        for (const r of q.rows) {
-            const got = theaterKeyCache.get(r.theater_id);
-            if (!got) continue;
-            const trigger = new Date(r.start_at).getTime() + CHECK_DELAY_SEC*1000;
-            if (trigger >= Date.now() - WINDOW_SEC*1000) {
-                const { local_date, local_time } = fmtLocalDateTime(r.start_at);
-                heap.push({
-                    ts: trigger,
-                    windowEnd: trigger + WINDOW_SEC*1000,
-                    params: {
-                        showing_id: r.showing_id,
-                        movie_id:   r.movie_id,
-                        theater_id: r.theater_id,
-                        movieTitle: r.movie_title,
-                        local_date, local_time,
-                        locationId: got.locationId,
-                        showtimesKey: got.key,
+            // Cineplex needs an API key; Cinemathèque does not
+            if (provider === "cineplex") {
+                const cached = theaterKeyCache.get(r.theater_id);
+                if (!cached || (nowMs - cached.fetchedAt) > KEY_CACHE_TTL_MS) {
+                    if (!r.theatre_url || !r.location_id) {
+                        // If a Cineplex theater lacks IDs/URL, skip until data fixed
+                        continue;
                     }
-                });
+                    const key = await getShowtimesKeyFromTheatreUrl(r.theatre_url);
+                    theaterKeyCache.set(r.theater_id, { key, locationId: r.location_id, fetchedAt: Date.now() });
+                }
+            }
+            const { offsetSec, windowAfterSec } = PROVIDER_TIMING[provider] || DEFAULT_TIMING;
+
+            // queue time = start_at + provider offset
+            const startMs  = new Date(r.start_at).getTime();
+            const trigger  = startMs + offsetSec * 1000;
+            const windowEnd = trigger + windowAfterSec * 1000;
+
+
+            // only enqueue if the window hasn’t completely expired yet
+            if (Date.now() <= windowEnd) {
+                const { local_date, local_time } = fmtLocalDateTime(r.start_at);
+                const payload = {
+                    provider,
+                    showing_id: r.showing_id,
+                    movie_id:   r.movie_id,
+                    theater_id: r.theater_id,
+                    movieTitle: r.movie_title,
+                    local_date,
+                    local_time,
+                };
+                if (provider === "cineplex") {
+                    const got = theaterKeyCache.get(r.theater_id);
+                    if (!got) continue;
+                    payload.locationId  = got.locationId;
+                    payload.showtimesKey = got.key;
+                }
+                heap.push({ ts: trigger, windowEnd, params: payload });
                 enq++;
             }
         }
@@ -133,36 +159,44 @@ async function tick() {
         const task = heap.pop();
         if (now <= task.windowEnd) due.push(task.params);
     }
-    if (!due.length) {
-        if (LOG_LEVEL === "debug") console.log(`[tick] no due; heap=${heap.a.length}`);
-        return;
-    }
+    if (!due.length) return;
 
-    await Promise.allSettled(due.map(p => scrapeLimit(async () => {
-        try {
-            const rec = await scrapeSeatsOnly({
-                movieTitle: p.movieTitle,
-                local_date: p.local_date,
-                local_time: p.local_time,
-                locationId: p.locationId,
-                showtimesKey: p.showtimesKey,
-            });
-            if (rec) {
-                measurements.push({
-                    showing_id: p.showing_id,
-                    movie_id:   p.movie_id,
-                    theater_id: p.theater_id,
-                    auditorium: rec.auditorium ?? null,
-                    measured_at: rec.measured_at,
-                    seats_remaining: rec.seats_remaining ?? null,
-                    source: "cineplex",
-                });
+    await Promise.allSettled(
+        due.map(p => scrapeLimit(async () => {
+            try {
+                let rec;
+                if (p.provider === "cinematheque") {
+                    rec = await cinemathequeScrapeSeats({
+                        dateISO: p.local_date,
+                        hhmm:    p.local_time,
+                        title:   p.movieTitle,
+                        });
+                } else {
+                    rec = await scrapeSeatsOnlyCineplex({
+                        movieTitle: p.movieTitle,
+                        local_date: p.local_date,
+                        local_time: p.local_time,
+                        locationId: p.locationId,
+                        showtimesKey: p.showtimesKey
+                    });
+                }
+                if (rec) {
+                    measurements.push({
+                        showing_id: p.showing_id,
+                        movie_id:   p.movie_id,
+                        theater_id: p.theater_id,
+                        auditorium: rec.auditorium ?? null,
+                        measured_at: rec.measured_at,
+                        seats_remaining: rec.seats_remaining ?? null,
+                        source: p.provider
+                    });
+                }
+            } catch (e) {
+                failures.push({ params: p, err: e?.message || String(e) });
+                console.warn("[sample] failed:", e?.message || e, "payload:", p);
             }
-        } catch (e) {
-            failures.push({ params: p, err: e?.message || String(e) });
-            console.warn("[sample] failed:", e?.message || e, "payload:", p);
-        }
-    })));
+        }))
+    );
 
     console.log(`[tick] sampled ${due.length} show(s); buffered=${measurements.length}`);
 }
