@@ -3,8 +3,32 @@ import { searchMovie } from "../insert/searchMovie.js";
 import { insertMetadata } from "../insert/insertMetadata.js";
 
 const PROV_BASE  = 1_000_000_000;
-const PROV_LIMIT = 2_000_000_000 - 1;
+const PROV_LIMIT = 1_999_999_999;
 
+/* ---------- NORMALIZATION (JS side) ---------- */
+function cleanFrTitle(raw) {
+    return (raw || "")
+        // remove VF/VO markers
+        .replace(/\bV\.?F\.?(\s*Q|O?F)?\b/ig, "")
+        .replace(/\bV\.?O\.?(S?T\.)?\b/ig, "")
+        .replace(/\s*\(\s*version\s+fran(?:ç|c)aise\s*\)\s*/ig, "")
+        .replace(/\s*\(\s*vf(?:of)?\s*\)\s*/ig, "")
+        .replace(/\s+vf(?:of)?\s*$/i, "")
+        .trim();
+}
+function normTitleJS(s = "") {
+    // normalize Unicode, remove zero-widths, map NBSP to space, collapse spaces, toLower
+    return s
+        .normalize("NFKC")
+        .replace(/[\u200B-\u200D\uFEFF]/g, "")          // zero-widths
+        .replace(/\u00A0/g, " ")                         // NBSP -> space
+        .replace(/[“”„‟]/g, '"').replace(/[’‘‛]/g, "'") // smart quotes
+        .replace(/\s+/g, " ")
+        .toLowerCase()
+        .trim();
+}
+
+/* ---------- UTIL ---------- */
 async function genProvisionalId(db) {
     for (let i = 0; i < 8; i++) {
         const id = PROV_BASE + Math.floor(Math.random() * (PROV_LIMIT - PROV_BASE + 1));
@@ -14,135 +38,97 @@ async function genProvisionalId(db) {
     throw new Error("Could not generate a unique provisional id");
 }
 
-function cleanFrTitle(raw) {
-    return (raw || "")
-        .replace(/\bV\.?F\.?(\s*Q|O?F)?\b/ig, "")
-        .replace(/\bV\.?O\.?(S?T\.)?\b/ig, "")
-        .replace(/\s*\(\s*version\s+fran(?:ç|c)aise\s*\)\s*/ig, "")
-        .replace(/\s*\(\s*vf(?:of)?\s*\)\s*/ig, "")
-        .replace(/\s+vf(?:of)?\s*$/i, "")
-        .replace(/\s+/g, " ")
-        .trim();
-}
-
 async function hasUnaccent(db) {
     try { await db.query("SELECT unaccent('é')"); return true; } catch { return false; }
 }
 
-/** Find an existing movie, preferring exact FR-title match, then EN/original title.
- * Uses the SAME year-window: release_date BETWEEN (yearHint-1) and (yearHint+1).
- * Ordering preference: FR match first → non-provisional → has tmdb_id → popularity.
+/**
+ * FLOW:
+ * 1) Try TMDb (your searchMovie). If found → ensure metadata → return tmdbId.
+ * 2) Else try to reuse by exact/normalized fr_title/title (handles Unicode twins).
+ * 3) Else create a provisional row (protected by an advisory lock to avoid races).
+ *
+ * Concurrency: we take pg_advisory_xact_lock on normalized title so only one
+ * transaction can decide/insert for that title at a time.
  */
-async function findExistingByTitle(db, { title, yearHint }) {
-    const cleaned = cleanFrTitle(title);
-    const useUnaccent = await hasUnaccent(db);
-    const norm = (col) => useUnaccent ? `unaccent(lower(${col}))` : `lower(${col})`;
-    const p1   = useUnaccent ? "unaccent(lower($1))" : "lower($1)";
+export async function ensureMovieIdOrPlaceholder(
+    db,
+    { title, yearHint, baseFilmUrl, extraQueries = [] }
+) {
+    const frTitleRaw = cleanFrTitle(title);
+    if (!frTitleRaw) throw new Error("ensureMovieIdOrPlaceholder: missing frTitle/title");
+    const normKey = normTitleJS(frTitleRaw); // use as our lock key + SQL param
 
-    const whereParts = [
-        `(${norm("m.fr_title")} = ${p1} OR ${norm("m.title")} = ${p1})`
-    ];
-    const params = [cleaned];
+    // Start a short transaction to sequence operations and hold the lock.
+    await db.query("BEGIN");
 
-    if (yearHint) {
-        whereParts.push(`m.release_date BETWEEN ($2||'-01-01')::date AND ($3||'-12-31')::date`);
-        params.push(yearHint - 1, yearHint + 1);
-    }
+    try {
+        // ---- (A) lock on normalized title (prevents duplicate provisional inserts) ----
+        // hashtext($1) returns an int4; advisory lock is per transaction.
+        await db.query("SELECT pg_advisory_xact_lock(hashtext($1))", [normKey]);
 
-    const sql = `
-        SELECT
-            m.id,
-            (${norm("m.fr_title")} = ${p1}) AS fr_match,
-            (${norm("m.title")}    = ${p1}) AS en_match
-        FROM movies m
-        WHERE ${whereParts.join(" AND ")}
-        ORDER BY
-            fr_match DESC,                     -- prefer exact FR title match
-            m.id
-        LIMIT 1
-    `;
+        // ---- (B) TMDb first (quick—does not create duplicates) ----
+        const queries = [...new Set([frTitleRaw, ...extraQueries.filter(Boolean)])];
+        const years   = yearHint != null ? [yearHint, yearHint - 1, yearHint + 1] : [undefined];
 
-    const { rows } = await db.query(sql, params);
-    return rows[0]?.id ?? null;
-}
-
-/** Reuse an existing placeholder by normalized title or source_url (safe NULL handling). */
-async function reuseExistingPlaceholder(db, { title, baseFilmUrl, yearHint }) {
-    const useUnaccent = await hasUnaccent(db);
-    const norm  = (col) => useUnaccent ? `unaccent(lower(${col}))` : `lower(${col})`;
-    const p1    = useUnaccent ? "unaccent(lower($1))" : "lower($1)";
-    const sUrl2 = "$2::text"; // cast avoids "could not determine data type of parameter $2"
-
-    const whereParts = [
-        `provisional = TRUE`,
-        `(${norm("fr_title")} = ${p1} OR ${norm("title")} = ${p1} OR (COALESCE(${sUrl2}, '') <> '' AND source_url = ${sUrl2}))`,
-    ];
-    const params = [cleanFrTitle(title), (baseFilmUrl ?? null)];
-
-    if (yearHint) {
-        whereParts.push(`release_date BETWEEN ($3||'-01-01')::date AND ($4||'-12-31')::date`);
-        params.push(yearHint - 1, yearHint + 1);
-    }
-
-    const sql = `
-    SELECT id
-    FROM movies
-    WHERE ${whereParts.join(" AND ")}
-    ORDER BY id DESC
-    LIMIT 1
-  `;
-    const { rows } = await db.query(sql, params);
-    return rows[0]?.id ?? null;
-}
-
-export async function ensureMovieIdOrPlaceholder(db, { title, yearHint, baseFilmUrl, extraQueries = [] }) {
-    const cleanedTitle = cleanFrTitle(title);
-
-    // 0) EXACT FR (or EN/original) title match first — this is the key fix
-    const hit = await findExistingByTitle(db, { title: cleanedTitle, yearHint });
-    if (hit) return hit;
-
-    // 1) Your original “local by year” block (kept verbatim)
-    if (yearHint) {
-        const { rows } = await db.query(
-            `SELECT id FROM movies
-             WHERE (fr_title=$1 OR title=$1)
-               AND release_date BETWEEN ($2||'-01-01')::date AND ($3||'-12-31')::date
-             ORDER BY popularity DESC NULLS LAST
-             LIMIT 1`,
-            [cleanedTitle, yearHint - 1, yearHint + 1]
-        );
-        if (rows[0]) return rows[0].id;
-    }
-
-    // 2) TMDb search (include cleaned FR title first)
-    const qs = [...new Set([cleanedTitle, ...extraQueries])];
-    for (const q of qs) {
-        const m =
-            (await searchMovie(q, yearHint,   { strict: true, tol: 1, allowNoYearFallback: false })) ||
-            (await searchMovie(q, yearHint-1, { strict: true, tol: 0 })) ||
-            (await searchMovie(q, yearHint+1, { strict: true, tol: 0 }));
-        if (m?.id) {
-            await insertMetadata(m.id, cleanedTitle);
-            return m.id;
+        for (const q of queries) {
+            for (const y of years) {
+                try {
+                    const m = await searchMovie(q, y, { strict: true, tol: 1, allowNoYearFallback: false });
+                    if (m?.id) {
+                        await insertMetadata(m.id, frTitleRaw);
+                        await db.query("COMMIT");
+                        return Number(m.id);
+                    }
+                } catch { /* ignore and continue */ }
+            }
         }
-    }
 
-    // 3) Reuse an existing placeholder (title/source_url), with safe casts
-    const reuseId = await reuseExistingPlaceholder(db, {
-        title: cleanedTitle,
-        baseFilmUrl: baseFilmUrl ? String(baseFilmUrl) : null,
-        yearHint,
-    });
-    if (reuseId) return reuseId;
+        // ---- (C) Reuse existing by EXACT or NORMALIZED match (handles NFC/NFD, NBSP, quotes) ----
+        const useUnaccent = await hasUnaccent(db);
+        const sqlNorm = (col) => {
+            // lower( … collapse spaces … map nbsp to space … unify quotes … [unaccent] … )
+            const base =
+                `lower(
+           regexp_replace(
+             translate(translate(${col}, E'\\u00A0', ' '), '’‘‛“”„‟', '''''''"""""'),
+             '\\s+', ' ', 'g'
+           )
+         )`;
+            return useUnaccent ? `lower(regexp_replace(unaccent(${base}), '\\s+', ' ', 'g'))` : base;
+        };
 
-    // 4) Create new placeholder
-    const tempId = await genProvisionalId(db);
-    await db.query(
-        `INSERT INTO movies (id, fr_title, title, provisional, source_url)
+        const findSql = `
+      SELECT id
+      FROM movies
+      WHERE
+        -- byte-exact first
+        fr_title = $1 OR title = $1
+        OR ${sqlNorm("fr_title")} = $2
+        OR ${sqlNorm("title")}    = $2
+      ORDER BY id
+      LIMIT 1
+    `;
+        const found = await db.query(findSql, [frTitleRaw, normKey]);
+        if (found.rowCount) {
+            await db.query("COMMIT");
+            return Number(found.rows[0].id);
+        }
+
+        // ---- (D) Create provisional row (still under the lock) ----
+        const tempId = await genProvisionalId(db);
+        await db.query(
+            `INSERT INTO movies (id, fr_title, title, provisional, source_url)
        VALUES ($1, $2, $2, TRUE, $3)
        ON CONFLICT (id) DO NOTHING`,
-        [tempId, cleanedTitle, baseFilmUrl ? String(baseFilmUrl) : null]
-    );
-    return tempId;
+            [tempId, frTitleRaw, baseFilmUrl ?? null]
+        );
+
+        await db.query("COMMIT");
+        return tempId;
+
+    } catch (e) {
+        await db.query("ROLLBACK");
+        throw e;
+    }
 }
