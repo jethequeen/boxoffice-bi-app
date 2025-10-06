@@ -113,10 +113,10 @@ async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, s
 
     const { rows } = await pgClient.query(
         `SELECT id AS screen_id, name, seat_count
-       FROM screens
-      WHERE theater_id = $1 AND seat_count = $2
-      ORDER BY name
-      LIMIT 1`,
+         FROM screens
+         WHERE theater_id = $1 AND seat_count = $2
+         ORDER BY name
+             LIMIT 1`,
         [theater_id, capacity]
     );
     if (!rows.length) return { wrote: false, reason: "no screen with that seat_count" };
@@ -126,11 +126,11 @@ async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, s
 
     await pgClient.query(
         `UPDATE showings
-        SET screen_id = $2,
-            seats_sold = $3,
-            seats_sold_measured_at = $4,
-            seats_sold_source = $5
-      WHERE id = $1`,
+         SET screen_id = $2,
+             seats_sold = $3,
+             seats_sold_measured_at = $4,
+             seats_sold_source = $5
+         WHERE id = $1`,
         [showing_id, screen_id, seats_sold, measured_at, source || 'cineentreprise']
     );
 
@@ -149,23 +149,23 @@ async function syncFromDb() {
     await client.connect();
     try {
         const q = await client.query(`
-      SELECT
-        s.id                          AS showing_id,
-        s.movie_id,
-        s.theater_id,
-        COALESCE(m.fr_title, m.title) AS movie_title,
-        s.start_at,
-        t.theater_api_id              AS location_id,
-        t.showings_url                AS theatre_url,
-        t.name                        AS theater_name
-      FROM showings s
-      JOIN theaters t ON t.id = s.theater_id
-      JOIN movies   m ON m.id = s.movie_id
-      WHERE s.seats_sold IS NULL
-        AND s.start_at BETWEEN (now() - make_interval(mins => $1))
-                           AND (now() + make_interval(hours => $2))
-      ORDER BY s.start_at
-    `, [BACKPAD_MIN, LOOKAHEAD_H]);
+            SELECT
+                s.id                          AS showing_id,
+                s.movie_id,
+                s.theater_id,
+                COALESCE(m.fr_title, m.title) AS movie_title,
+                s.start_at,
+                t.theater_api_id              AS location_id,
+                t.showings_url                AS theatre_url,
+                t.name                        AS theater_name
+            FROM showings s
+                     JOIN theaters t ON t.id = s.theater_id
+                     JOIN movies   m ON m.id = s.movie_id
+            WHERE s.seats_sold IS NULL
+              AND s.start_at BETWEEN (now() - make_interval(mins => $1))
+                AND (now() + make_interval(hours => $2))
+            ORDER BY s.start_at
+        `, [BACKPAD_MIN, LOOKAHEAD_H]);
 
         const nowMs = Date.now();
         let enq = 0;
