@@ -1,24 +1,68 @@
 ﻿version: "3.9"
 
 services:
+  # ---------- Production (immutable) ----------
   seats-sold:
-    build: .
+    build:
+      context: .
+      target: prod              # uses the prod stage (copies source)
     container_name: seats-sold
+    restart: unless-stopped
+    shm_size: "1gb"
+    env_file:
+      - .env.txt
+    environment:
+      - TZ=America/Toronto
+      - RESYNC_MIN=180
+      - LOOKAHEAD_H=8
+      - BACKPAD_MIN=30
+      - FLUSH_MIN=60
+      - FLUSH_BATCH=100
+      - CHECK_DELAY_SEC=780
+      - WINDOW_SEC=60
+      - QUIET_START=01:00
+      - QUIET_END=10:00
+    profiles: ["prod"]
+    # No volumes in prod (immutable)
+
+  # ---------- Developer hot-reload (no rebuild on code changes) ----------
+  seats-sold-dev:
+    build:
+      context: .
+      target: runtime           # node + chromium + node_modules, no app copied
+    container_name: seats-sold-dev
     restart: unless-stopped
     env_file:
       - .env.txt
-    # optional: set timezone in the container
     environment:
       - TZ=America/Toronto
-      - RESYNC_MIN=180          # 3h
+      - WEBDEV_DEBUG=1
+      # your daemon timing vars (override as you like for faster testing)
+      - RESYNC_MIN=10
       - LOOKAHEAD_H=8
-      - BACKPAD_MIN=30          # resilience to restarts (10–40 fine)
-      - FLUSH_MIN=60
-      - FLUSH_BATCH=100
-      - CHECK_DELAY_SEC=780     # 13 min
-      - WINDOW_SEC=60
-      - QUIET_START=01:00       # if you added the quiet-hours guard
-      - QUIET_END=10:00
-    # no ports exposed, since it's a background worker
-    # volumes:
-    #   - ./logs:/app/logs   # uncomment if you want persistent logs on host
+      - BACKPAD_MIN=30
+      - FLUSH_MIN=5
+      - FLUSH_BATCH=5
+      - CHECK_DELAY_SEC=30
+      - WINDOW_SEC=300
+      - QUIET_START=00:00
+      - QUIET_END=00:00
+    command: >
+      nodemon --quiet
+      --watch cron --watch daemon --watch scraper --watch insert --watch db
+      --ext js,json
+      --delay 150ms
+      -- cron/seatsSold.js
+    # Bind-mount only source dirs so we don't shadow node_modules from the image
+    volumes:
+      - ./cron:/boxoffice-bi-app/cron:cached
+      - ./daemon:/boxoffice-bi-app/daemon:cached
+      - ./scraper:/boxoffice-bi-app/scraper:cached
+      - ./insert:/boxoffice-bi-app/insert:cached
+      - ./db:/boxoffice-bi-app/db:cached
+      - ./utils:/boxoffice-bi-app/utils:cached
+      - ./config:/boxoffice-bi-app/config:cached
+      - ./package.json:/boxoffice-bi-app/package.json:cached
+      # optionally persist logs to host:
+      # - ./logs:/boxoffice-bi-app/logs
+    profiles: ["dev"]

@@ -1,43 +1,43 @@
-﻿# ---- Build & runtime image (Debian-based for Puppeteer deps) ----
-FROM node:20-bullseye
+﻿# ---- Base image with Chromium deps (built once, cached) ----
+FROM node:20-bullseye AS base
 
-# Set timezone & locales early (noninteractive tzdata install)
 ENV TZ=America/Toronto \
     DEBIAN_FRONTEND=noninteractive \
     NODE_ENV=production \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1 \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# System deps for Chromium + fonts
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tzdata ca-certificates \
-    chromium \
-    # common runtime libs Puppeteer/Chromium need
+    tzdata ca-certificates chromium \
     libnss3 libxss1 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxrandr2 \
     libgtk-3-0 libasound2 libatk1.0-0 libatk-bridge2.0-0 \
-    libdrm2 libgbm1 libxdamage1 \
-    libpango-1.0-0 libcairo2 \
+    libdrm2 libgbm1 libxdamage1 libpango-1.0-0 libcairo2 \
+    libxshmfence1 libxkbcommon0 \
     fonts-liberation fonts-noto-color-emoji \
-    && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
-# App directory
+
 WORKDIR /boxoffice-bi-app
 
-# Install node deps first (better layer cache)
+# ---- Dependencies layer (reused for dev/prod) ----
+FROM base AS deps
+# leverage build cache for npm
 COPY package*.json ./
-# If you use pnpm/yarn, swap accordingly
-RUN npm ci --omit=dev
+# cache npm downloads so "npm ci" is fast
+# (safe to omit if your builder doesn't support --mount=type=cache)
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
 
-# Copy source
-COPY . .
-
-# Use the pre-created 'node' user from base image for safer runtime
+# ---- Runtime base with node_modules but no app code (great for dev) ----
+FROM base AS runtime
+COPY --from=deps /boxoffice-bi-app/node_modules ./node_modules
+# Optional: preinstall nodemon for dev (or use npx in compose)
+RUN npm i -g nodemon
 USER node
 
-# No ports to expose; this is a daemon
-# Healthcheck is optional; here we just ensure node can start
+# ---- Production image (copies source once; immutable at runtime) ----
+FROM runtime AS prod
+COPY . .
+# Healthcheck is optional
 HEALTHCHECK --interval=1m --timeout=10s --start-period=30s --retries=3 \
   CMD node -e "process.exit(0)"
-
-# Run the daemon
 CMD ["node", "cron/seatsSold.js"]
