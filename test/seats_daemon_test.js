@@ -17,7 +17,7 @@ function fmtLocalDateTime(iso) {
     return { local_date: `${Y}-${M}-${D}`, local_time: `${HH}:${mm}` };
 }
 // put near the top
-const WINDOW_BACK  = "12 hours";   // how far back we’ll still consider
+const WINDOW_BACK  = "-6 hours";   // how far back we’ll still consider
 const WINDOW_AHEAD = "14 days";    // how far forward
 const PROVIDER_CQ  = `(t.name ILIKE '%cinémathèque québécoise%' OR t.name ILIKE '%cinematheque quebecoise%')`;
 

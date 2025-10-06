@@ -26,7 +26,7 @@ const LOG_LEVEL        = "info";  // "debug" for chattier logs
  *  accept window: [trigger .. trigger + windowAfterSec]
  */
 const PROVIDER_TIMING = {
-    cinematheque: { offsetSec: -3 * 60,  windowAfterSec: 2 * 60 },  // run 3m before; accept another 2 minutes
+    cinematheque: { offsetSec: -7 * 60,  windowAfterSec: 2 * 60 },  // run 5m before; accept another 2 minutes
     cineplex:     { offsetSec: 12 * 60,  windowAfterSec: 3 * 60 },  // run 12m after; accept another 3 minutes
 };
 // default fallback if a theatre doesn’t match either bucket
