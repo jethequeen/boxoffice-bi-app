@@ -6,7 +6,7 @@ import { getSeatsByTheater, classifyTheaterName } from "../scraper/provider_regi
 
 /* ---------- Hardcoded config (no envs) ---------- */
 const TZ               = "America/Toronto";
-const RESYNC_MIN       = 180;
+const RESYNC_MIN       = 30;
 const LOOKAHEAD_H      = 8;
 const BACKPAD_MIN      = 15;
 const FLUSH_MIN        = 60;
@@ -16,7 +16,7 @@ const UPSERT_CONC      = 8;
 const KEY_CACHE_TTL_MS = 60*60*1000;
 const QUIET_START      = "01:00"; // inclusive
 const QUIET_END        = "10:00"; // exclusive
-const LOG_LEVEL        = "info";
+const LOG_LEVEL        = "DEBUG";
 
 /** Provider-specific timing (seconds) */
 const PROVIDER_TIMING = {
@@ -282,7 +282,7 @@ async function main() {
     if (!inQuietHours()) await syncFromDb();
 
     setInterval(() => { if (!inQuietHours()) syncFromDb().catch(e => console.error("[sync] error", e)); }, RESYNC_MIN * 60 * 1000);
-    setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, 60 * 1000);
+    setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, 30 * 1000);
     setInterval(() => { if (!inQuietHours()) flush(false).catch(e => console.error("[flush] error", e)); }, FLUSH_MIN * 60 * 1000);
 
     const shutdown = async () => { try { await flush(true); } finally { process.exit(0); } };
