@@ -18,14 +18,19 @@ const QUIET_START      = "01:00"; // inclusive
 const QUIET_END        = "10:00"; // exclusive
 const LOG_LEVEL        = "debug";
 
-/** Provider-specific timing (seconds) */
+/* Tick cadence (30s) and a safe grace for windowAfterSec so ticks can catch tasks */
+const TICK_MS = 30_000;
+const MIN_AFTER_SEC = Math.max(60, Math.ceil(TICK_MS/1000) + 15); // >= ~45s; use 60s minimum
+
+/** Provider-specific timing (seconds). windowAfterSec is clamped to MIN_AFTER_SEC */
+function withMinAfter(t){ return { ...t, windowAfterSec: Math.max(t.windowAfterSec ?? 0, MIN_AFTER_SEC) }; }
 const PROVIDER_TIMING = {
-    cinematheque: { offsetSec: -7 * 60, windowAfterSec: 2 * 60 },
-    cineplex:     { offsetSec: 12 * 60, windowAfterSec: 3 * 60 },
-    webdev:       { offsetSec:  8 * 60, windowAfterSec: 3 * 60 },
-    cineentreprise:{ offsetSec: -7 * 60, windowAfterSec: 1 },
+    cinematheque:  withMinAfter({ offsetSec: -7 * 60, windowAfterSec: 2 * 60 }),
+    cineplex:      withMinAfter({ offsetSec: 12 * 60, windowAfterSec: 3 * 60 }),
+    webdev:        withMinAfter({ offsetSec:  8 * 60, windowAfterSec: 3 * 60 }),
+    cineentreprise:withMinAfter({ offsetSec: -7 * 60, windowAfterSec: 60      }), // ~7 min before, >= 60s after
 };
-const DEFAULT_TIMING = { offsetSec: 12 * 60, windowAfterSec: 5 * 60 };
+const DEFAULT_TIMING = withMinAfter({ offsetSec: 12 * 60, windowAfterSec: 5 * 60 });
 
 /* ---------- HTTP keep-alive ---------- */
 setGlobalDispatcher(new Agent({ connections: 16, pipelining: 1, keepAliveTimeout: 30_000 }));
@@ -56,8 +61,6 @@ function fmtLocalDateTime(iso){
 
 async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining, measured_at, source }) {
     if (capacity == null || seats_remaining == null) return { wrote: false, reason: "missing capacity/seats_remaining" };
-
-    // pick a screen with that capacity (if multiple, choose first by name; you can refine if needed)
     const { rows } = await pgClient.query(
         `SELECT id AS screen_id, name, seat_count
        FROM screens
@@ -71,22 +74,18 @@ async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, s
     const screen_id = rows[0].screen_id;
     const seats_sold = Math.max(0, rows[0].seat_count - seats_remaining);
 
-    // attach screen and seats_sold to the showing (mirror your cineplex upsert logic)
     await pgClient.query(
-        `
-    UPDATE showings
-       SET screen_id = $2,
-           seats_sold = $3,
-           seats_sold_measured_at = $4,
-           seats_sold_source = $5
-     WHERE id = $1
-    `,
+        `UPDATE showings
+        SET screen_id = $2,
+            seats_sold = $3,
+            seats_sold_measured_at = $4,
+            seats_sold_source = $5
+      WHERE id = $1`,
         [showing_id, screen_id, seats_sold, measured_at, source || 'cineentreprise']
     );
 
     return { wrote: true, screen_id, seats_sold };
 }
-
 
 /* ---------- State ---------- */
 const heap         = new MinHeap();
@@ -100,31 +99,35 @@ async function syncFromDb() {
     await client.connect();
     try {
         const q = await client.query(`
-            SELECT
-                s.id                          AS showing_id,
-                s.movie_id,
-                s.theater_id,
-                COALESCE(m.fr_title, m.title) AS movie_title,
-                s.start_at,
-                t.theater_api_id              AS location_id,
-                t.showings_url                AS theatre_url,
-                t.name                        AS theater_name
-            FROM showings s
-                     JOIN theaters t ON t.id = s.theater_id
-                     JOIN movies   m ON m.id = s.movie_id
-            WHERE s.seats_sold IS NULL
-              AND s.start_at BETWEEN (now() - make_interval(mins => $1))
-                AND (now() + make_interval(hours => $2))
-            ORDER BY s.start_at
-        `, [BACKPAD_MIN, LOOKAHEAD_H]);
+      SELECT
+          s.id                          AS showing_id,
+          s.movie_id,
+          s.theater_id,
+          COALESCE(m.fr_title, m.title) AS movie_title,
+          s.start_at,
+          t.theater_api_id              AS location_id,
+          t.showings_url                AS theatre_url,
+          t.name                        AS theater_name
+      FROM showings s
+      JOIN theaters t ON t.id = s.theater_id
+      JOIN movies   m ON m.id = s.movie_id
+      WHERE s.seats_sold IS NULL
+        AND s.start_at BETWEEN (now() - make_interval(mins => $1))
+                          AND (now() + make_interval(hours => $2))
+      ORDER BY s.start_at
+    `, [BACKPAD_MIN, LOOKAHEAD_H]);
 
         const nowMs = Date.now();
         let enq = 0;
 
         for (const r of q.rows) {
             const name = r.theater_name || "";
-            const provider = classifyTheaterName(name) || "webdev";
-
+            const provider = classifyTheaterName(name);          // <-- no default "webdev" anymore
+            if (!provider) {
+                if (LOG_LEVEL === "debug") console.warn("[sync] skip unmapped theater:", name, "showing_id=", r.showing_id);
+                failures.push({ params: { showing_id: r.showing_id, theater_name: name }, err: "unmapped_theater" });
+                continue;
+            }
 
             // Cineplex key prefetch unchanged…
             if (provider === "cineplex") {
@@ -161,6 +164,9 @@ async function syncFromDb() {
                     payload.showtimesKey = got.key;
                 }
                 heap.push({ ts: trigger, windowEnd, params: payload });
+                enq++;
+            } else {
+                if (LOG_LEVEL === "debug") console.warn("[sync] skip past-window", { showing_id: r.showing_id, theater: name });
             }
         }
 
@@ -170,21 +176,30 @@ async function syncFromDb() {
     }
 }
 
+/* ---------- TICK ---------- */
 async function tick() {
     const now = Date.now();
     const due = [];
     while (heap.peek() && heap.peek().ts <= now) {
         const task = heap.pop();
-        if (now <= task.windowEnd) due.push(task.params);
-    }
-    if (!due.length) {
-        if (LOG_LEVEL === "debug") {
-            console.log(`[tick] heartbeat: heap=${heap.a.length} failures=${failures.length} queuedMeasurements=${measurements.length}`);
+        if (now <= task.windowEnd) {
+            due.push(task.params);
+        } else {
+            // New: explicit missed-window log so silent drops are visible
+            console.warn("[tick] missed window", {
+                showing_id: task.params.showing_id,
+                provider: task.params.provider,
+                theater: task.params.theater_name,
+                at: `${task.params.local_date} ${task.params.local_time}`,
+                trigger: new Date(task.ts).toISOString?.() || task.ts,
+                windowEnd: new Date(task.windowEnd).toISOString?.() || task.windowEnd,
+                now: new Date(now).toISOString()
+            });
         }
-        return;
     }
+    if (!due.length) return;
 
-    // NEW: priority — CE first, then Cineplex, then the rest
+    // Priority — CE first, then Cineplex, then the rest
     const prio = { cineentreprise: 0, cineplex: 1, cinematheque: 2, webdev: 3 };
     due.sort((a, b) => (prio[a.provider] ?? 99) - (prio[b.provider] ?? 99));
 
@@ -209,7 +224,7 @@ async function tick() {
                         seats_remaining: rec.seats_remaining ?? null,
                         source:          rec.source ?? p.provider,
 
-                        // NEW: stash capacity so we can map to a screen by seat_count for CE
+                        // Stash capacity so we can map to a screen by seat_count for CE
                         capacity:        rec.sellable ?? rec.raw?.sellable ?? null,
                     });
                 }
@@ -223,7 +238,7 @@ async function tick() {
     console.log(`[tick] sampled ${due.length} show(s); buffered=${measurements.length}`);
 }
 
-
+/* ---------- FLUSH ---------- */
 async function flush(force=false) {
     if (!force && measurements.length < FLUSH_BATCH) return;
     const batch = measurements.splice(0, measurements.length);
@@ -237,13 +252,13 @@ async function flush(force=false) {
 
         await Promise.allSettled(batch.map(m => upsertLimit(async () => {
             try {
-                // NEW: Ciné Entreprise path — no auditorium, but we have capacity
+                // CE path — no auditorium, but we may have capacity
                 if (m.source === "cineentreprise") {
                     const res = await upsertBySeatCount({
                         pgClient: client,
                         theater_id:      m.theater_id,
                         showing_id:      m.showing_id,
-                        capacity:        m.capacity,            // from tick()
+                        capacity:        m.capacity,
                         seats_remaining: m.seats_remaining,
                         measured_at:     m.measured_at,
                         source:          m.source,
@@ -281,19 +296,18 @@ async function flush(force=false) {
     }
 }
 
-
 /* ---------- Scheduling ---------- */
 async function main() {
     if (!inQuietHours()) await syncFromDb();
 
     setInterval(() => { if (!inQuietHours()) syncFromDb().catch(e => console.error("[sync] error", e)); }, RESYNC_MIN * 60 * 1000);
-    setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, 30 * 1000);
+    setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, TICK_MS);
     setInterval(() => { if (!inQuietHours()) flush(false).catch(e => console.error("[flush] error", e)); }, FLUSH_MIN * 60 * 1000);
 
     const shutdown = async () => { try { await flush(true); } finally { process.exit(0); } };
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
 
-    console.log(`[start] seats heap daemon: resync=${RESYNC_MIN}m, lookahead=${LOOKAHEAD_H}h, tick=30 seconds, flush=${FLUSH_MIN}m, batch=${FLUSH_BATCH}`);
+    console.log(`[start] seats heap daemon: resync=${RESYNC_MIN}m, lookahead=${LOOKAHEAD_H}h, tick=${Math.round(TICK_MS/1000)} seconds, flush=${FLUSH_MIN}m, batch=${FLUSH_BATCH}`);
 }
 main();
