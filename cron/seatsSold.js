@@ -6,7 +6,7 @@ import { getSeatsByTheater, classifyTheaterName } from "../scraper/provider_regi
 
 /* ---------- Hardcoded config (no envs) ---------- */
 const TZ               = "America/Toronto";
-const RESYNC_MIN       = 30;
+const RESYNC_MIN       = 180;
 const LOOKAHEAD_H      = 8;
 const BACKPAD_MIN      = 15;
 const FLUSH_MIN        = 60;
@@ -16,7 +16,7 @@ const UPSERT_CONC      = 8;
 const KEY_CACHE_TTL_MS = 60*60*1000;
 const QUIET_START      = "01:00"; // inclusive
 const QUIET_END        = "10:00"; // exclusive
-const LOG_LEVEL        = "DEBUG";
+const LOG_LEVEL        = "debug";
 
 /** Provider-specific timing (seconds) */
 const PROVIDER_TIMING = {
@@ -177,7 +177,12 @@ async function tick() {
         const task = heap.pop();
         if (now <= task.windowEnd) due.push(task.params);
     }
-    if (!due.length) return;
+    if (!due.length) {
+        if (LOG_LEVEL === "debug") {
+            console.log(`[tick] heartbeat: heap=${heap.a.length} failures=${failures.length} queuedMeasurements=${measurements.length}`);
+        }
+        return;
+    }
 
     // NEW: priority — CE first, then Cineplex, then the rest
     const prio = { cineentreprise: 0, cineplex: 1, cinematheque: 2, webdev: 3 };
@@ -289,6 +294,6 @@ async function main() {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
 
-    console.log(`[start] seats heap daemon: resync=${RESYNC_MIN}m, lookahead=${LOOKAHEAD_H}h, tick=1m, flush=${FLUSH_MIN}m, batch=${FLUSH_BATCH}`);
+    console.log(`[start] seats heap daemon: resync=${RESYNC_MIN}m, lookahead=${LOOKAHEAD_H}h, tick=30 seconds, flush=${FLUSH_MIN}m, batch=${FLUSH_BATCH}`);
 }
 main();
