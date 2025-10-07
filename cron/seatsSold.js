@@ -72,33 +72,76 @@ function fmtLocalDateTime(iso){
     return { local_date:`${Y}-${M}-${D}`, local_time:`${HH}:${mm}` };
 }
 
+// ---- schema-aware CE upsert with fuzzy seat_count match (±tolerance) ----
+const CE_SEAT_TOLERANCE = parseInt(process.env.CE_SEAT_TOLERANCE || "10", 10);
+
 async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining, measured_at, source }) {
-    if (capacity == null || seats_remaining == null) return { wrote: false, reason: "missing capacity/seats_remaining" };
-    const { rows } = await pgClient.query(
-        `SELECT id AS screen_id, name, seat_count
+    if (capacity == null || seats_remaining == null) {
+        return { wrote: false, reason: "missing capacity/seats_remaining" };
+    }
+
+    // 1) Try exact match first
+    let row;
+    {
+        const { rows } = await pgClient.query(
+            `SELECT id AS screen_id, name, seat_count
          FROM screens
-         WHERE theater_id = $1 AND seat_count = $2
-         ORDER BY name
-             LIMIT 1`,
-        [theater_id, capacity]
-    );
-    if (!rows.length) return { wrote: false, reason: "no screen with that seat_count" };
+        WHERE theater_id = $1 AND seat_count = $2
+        ORDER BY name
+        LIMIT 1`,
+            [theater_id, capacity]
+        );
+        row = rows[0];
+    }
 
-    const screen_id = rows[0].screen_id;
-    const seats_sold = Math.max(0, rows[0].seat_count - seats_remaining);
+    // 2) If no exact match, try fuzzy within ±tolerance and pick the closest
+    let fuzzy = false;
+    if (!row && CE_SEAT_TOLERANCE > 0) {
+        const { rows } = await pgClient.query(
+            `SELECT id AS screen_id, name, seat_count,
+              ABS(seat_count - $2) AS delta
+         FROM screens
+        WHERE theater_id = $1
+          AND seat_count BETWEEN ($2 - $3) AND ($2 + $3)
+        ORDER BY delta ASC, seat_count DESC, name
+        LIMIT 1`,
+            [theater_id, capacity, CE_SEAT_TOLERANCE]
+        );
+        if (rows.length) {
+            row = rows[0];
+            fuzzy = true;
+        }
+    }
 
-    await pgClient.query(
-        `UPDATE showings
-         SET screen_id = $2,
-             seats_sold = $3,
-             seats_sold_measured_at = $4,
-             seats_sold_source = $5
-         WHERE id = $1`,
-        [showing_id, screen_id, seats_sold, measured_at, source || 'cineentreprise']
-    );
+    if (!row) return { wrote: false, reason: "no screen with that seat_count (even fuzzy)" };
+
+    const screen_id = row.screen_id;
+    // seats_sold computed from the actual screen's seat_count we picked
+    const seats_sold_raw = (row.seat_count ?? 0) - (seats_remaining ?? 0);
+    const seats_sold = Math.max(0, Math.min(row.seat_count ?? 0, seats_sold_raw));
+
+
+        await pgClient.query(
+            `UPDATE showings
+          SET screen_id = $2,
+              seats_sold = $3,
+        WHERE id = $1`,
+            [showing_id, screen_id, seats_sold|| 'cineentreprise']
+        );
+
+    if (fuzzy && (process.env.LOG_LEVEL || "debug") === "debug") {
+        console.warn("[flush/CE] fuzzy seat_count match", {
+            showing_id,
+            theater_id,
+            scraped_capacity: capacity,
+            matched_screen_seat_count: row.seat_count,
+            tolerance: CE_SEAT_TOLERANCE
+        });
+    }
 
     return { wrote: true, screen_id, seats_sold };
 }
+
 
 /* ---------- State ---------- */
 const heap         = new MinHeap();
@@ -137,7 +180,6 @@ async function syncFromDb() {
             const name = r.theater_name || "";
             const provider = classifyTheaterName(name);  // no default "webdev"
             if (!provider) {
-                if (LOG_LEVEL === "debug") console.warn("[sync] skip unmapped theater:", name, "showing_id=", r.showing_id);
                 failures.push({ params: { showing_id: r.showing_id, theater_name: name }, err: "unmapped_theater" });
                 continue;
             }
@@ -178,8 +220,6 @@ async function syncFromDb() {
                 // schedule at window start (if window already started, we'll pick it up next tick)
                 heap.push({ ts: winStart, windowEnd: winEnd, params: payload });
                 enq++;
-            } else {
-                if (LOG_LEVEL === "debug") console.warn("[sync] skip past-window", { showing_id: r.showing_id, theater: name });
             }
         }
 
@@ -231,7 +271,6 @@ async function tick() {
                         movie_id:        p.movie_id,
                         theater_id:      p.theater_id,
                         auditorium:      rec.auditorium ?? null,
-                        measured_at:     rec.measured_at,
                         seats_remaining: rec.seats_remaining ?? null,
                         source:          rec.source ?? p.provider,
                         capacity:        rec.sellable ?? rec.raw?.sellable ?? null, // for CE seat_count mapping
@@ -268,7 +307,6 @@ async function flush(force=false) {
                         showing_id:      m.showing_id,
                         capacity:        m.capacity,
                         seats_remaining: m.seats_remaining,
-                        measured_at:     m.measured_at,
                         source:          m.source,
                     });
                     if (res.wrote) { wrote++; return; }
