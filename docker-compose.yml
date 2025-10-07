@@ -9,7 +9,7 @@ services:
       - .env.txt
     environment:
       - TZ=America/Toronto
-      # your daemon settings
+      # daemon knobs
       - RESYNC_MIN=180
       - LOOKAHEAD_H=8
       - BACKPAD_MIN=30
@@ -19,11 +19,16 @@ services:
       - WINDOW_SEC=60
       - QUIET_START=01:00
       - QUIET_END=10:00
-      # Optional: debug your scrapers
-      # - WEBDEV_DEBUG=1
-      # Make sure Playwright does not attempt to download browsers in runtime
+
+      # Make sure neither Playwright nor Puppeteer tries to download browsers
       - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
       - PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-    # Uncomment if you want persistent logs, npm cache, etc.
+      - PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chromium-from-pw
+      - PUPPETEER_CACHE_DIR=/home/pwuser/.cache/puppeteer
+
+      # Optional verbose scraper logs
+      # - WEBDEV_DEBUG=1
+
+    # optional: persist logs, etc.
     # volumes:
     #   - ./logs:/boxoffice-bi-app/logs
