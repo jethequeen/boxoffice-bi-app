@@ -16,7 +16,7 @@ const UPSERT_CONC      = 8;
 const KEY_CACHE_TTL_MS = 60*60*1000;
 const QUIET_START      = "01:00"; // inclusive
 const QUIET_END        = "10:00"; // exclusive
-const LOG_LEVEL        = "debug";
+const LOG_LEVEL        = "info";
 
 /* ---------- Tick cadence & window safety ---------- */
 const TICK_MS = 30_000;
