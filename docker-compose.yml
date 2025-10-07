@@ -8,12 +8,9 @@ services:
       - .env.txt
     environment:
       - TZ=America/Toronto
-      # make headless behave closer to IDE:
       - CE_ACCEPT_LANG=fr-CA,fr;q=0.9,en;q=0.8
       - CE_BLOCK_ASSETS=0
-      - CE_TIMEOUT_MS=60000
-      - DEBUG=pw:api
-      # your daemon timings...
+      - CE_TIMEOUT_MS=90000
       - RESYNC_MIN=180
       - LOOKAHEAD_H=8
       - BACKPAD_MIN=30

@@ -150,7 +150,7 @@ export async function getSeatCountsFromSchedule(cinemaSlug, theaterName, movieTi
 /* ---------------- helpers ---------------- */
 
 async function clickScheduleShowtime(page, movieTitle, timeHHMM) {
-    await page.waitForSelector(SEL.card, { timeout: 60_000 });
+    await page.waitForSelector(SEL.card, { timeout: 80_000 });
 
     // find card by title
     const cards = page.locator(SEL.card);
@@ -219,7 +219,7 @@ async function dismissVisitorGate(page) {
 
 async function addTicketsThenContinueFast(page, count = 1) {
     const modal = page.locator(SEL.addTicketsModal).first();
-    await modal.waitFor({ state: 'visible', timeout: 20_000 });
+    await modal.waitFor({ state: 'visible', timeout: 60_000 });
 
 
 // ✅ good: CSS + hasText filter
