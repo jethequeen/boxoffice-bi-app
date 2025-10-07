@@ -1,6 +1,6 @@
 ﻿FROM mcr.microsoft.com/playwright:v1.55.0-jammy
-USER root
 
+USER root
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=America/Toronto \
     LANG=fr_CA.UTF-8 \
@@ -24,16 +24,21 @@ RUN apt-get update -y \
  && locale-gen \
  && rm -rf /var/lib/apt/lists/*
 
-# deps first for cache
+# Install node deps first for cache
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# Install the exact Chrome that your puppeteer-core expects
-# (use the puppeteer CLI matching your puppeteer-core version)
-# If you have puppeteer-core@22.x, use the same major here:
-RUN su - pwuser -c "npx -y puppeteer@$(node -p \"require('./node_modules/puppeteer-core/package.json').version.split('.')[0]\") browsers install chrome"
+# IMPORTANT: run as pwuser and use bash so $(...) works
+USER pwuser
+SHELL ["/bin/bash", "-lc"]
 
-# app code
+# Install the Chrome version matching your puppeteer-core MAJOR
+# (e.g., puppeteer-core 22.x => use puppeteer@22 CLI)
+RUN npx -y puppeteer@$(node -p "require('./node_modules/puppeteer-core/package.json').version.split('.')[0]") \
+    browsers install chrome
+
+# App code
+USER root
 COPY . .
 RUN chown -R pwuser:pwuser /boxoffice-bi-app
 USER pwuser
