@@ -1,43 +1,30 @@
-﻿# ---- Base image with Chromium deps (built once, cached) ----
-FROM node:20-bullseye AS base
+﻿# Includes Chromium/WebKit/Firefox + all required OS deps preinstalled
+# Pin a version you’re comfortable with:
+FROM mcr.microsoft.com/playwright:v1.47.2-jammy
 
-ENV TZ=America/Toronto \
-    DEBIAN_FRONTEND=noninteractive \
-    NODE_ENV=production \
-    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1 \
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# Keep Node in production mode
+ENV NODE_ENV=production \
+    TZ=America/Toronto \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    tzdata ca-certificates chromium \
-    libnss3 libxss1 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxrandr2 \
-    libgtk-3-0 libasound2 libatk1.0-0 libatk-bridge2.0-0 \
-    libdrm2 libgbm1 libxdamage1 libpango-1.0-0 libcairo2 \
-    libxshmfence1 libxkbcommon0 \
-    fonts-liberation fonts-noto-color-emoji \
- && rm -rf /var/lib/apt/lists/*
-
-
+# Workdir
 WORKDIR /boxoffice-bi-app
 
-# ---- Dependencies layer (reused for dev/prod) ----
-FROM base AS deps
-# leverage build cache for npm
+# Install dependencies first for better layer caching
 COPY package*.json ./
-# cache npm downloads so "npm ci" is fast
-# (safe to omit if your builder doesn't support --mount=type=cache)
-RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev
+# If you use pnpm/yarn, swap this line accordingly
+RUN npm ci --omit=dev
 
-# ---- Runtime base with node_modules but no app code (great for dev) ----
-FROM base AS runtime
-COPY --from=deps /boxoffice-bi-app/node_modules ./node_modules
-# Optional: preinstall nodemon for dev (or use npx in compose)
-RUN npm i -g nodemon
-USER node
-
-# ---- Production image (copies source once; immutable at runtime) ----
-FROM runtime AS prod
+# Copy the rest of your source
 COPY . .
-# Healthcheck is optional
+
+# Use the pre-created 'pwuser' (playwright base image default) which has correct permissions
+USER pwuser
+
+# Optional healthcheck (verifies Node runs & Playwright CLI is present)
 HEALTHCHECK --interval=1m --timeout=10s --start-period=30s --retries=3 \
-  CMD node -e "process.exit(0)"
+  CMD node -e "process.exit(0)" && npx playwright --version >/dev/null 2>&1 || exit 1
+
+# Run your daemon
 CMD ["node", "cron/seatsSold.js"]
