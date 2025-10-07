@@ -1,6 +1,7 @@
 ﻿// cineEntreprise_fromSchedule.fast.js
 import { chromium } from 'playwright';
 
+
 const SEL = {
     cookieAccept: 'button[data-cky-tag="accept-button"], .cky-btn-accept',
 
@@ -42,14 +43,27 @@ export async function getSeatCountsFromSchedule(cinemaSlug, theaterName, movieTi
         ...(opts.launch || {}),
     });
 
+    const acceptLang = process.env.CE_ACCEPT_LANG || 'fr-CA,fr;q=0.9,en;q=0.8';
+    const blockAssets = (process.env.CE_BLOCK_ASSETS ?? '1') !== '0';
+    const defaultTimeout = parseInt(process.env.CE_TIMEOUT_MS || '45000', 10);
+
     const context = await browser.newContext({
         locale: 'fr-CA',
         timezoneId: 'America/Toronto',
-        userAgent:
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-            '(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
         viewport: { width: 1366, height: 900 },
+        extraHTTPHeaders: { 'Accept-Language': acceptLang },
     });
+
+    if (blockAssets) {
+        await context.route('**/*', route => {
+            const t = route.request().resourceType();
+            if (t === 'image' || t === 'font' || t === 'media') return route.abort();
+            return route.continue();
+        });
+    }
+
+
 
     // small perf win: skip images/fonts, keep xhr/css/js
     await context.route('**/*', route => {
@@ -79,6 +93,13 @@ export async function getSeatCountsFromSchedule(cinemaSlug, theaterName, movieTi
         // click wanted time inside the movie card
         await clickScheduleShowtime(page, movieTitle, timeHHMM);
 
+        // After clicking showtime, allow KO/Remodal scripts to attach
+        await Promise.race([
+            page.waitForLoadState('networkidle', { timeout: 8000 }),
+            page.waitForTimeout(2000),
+        ]);
+
+
         // try to dismiss visitor gate if it appears
         await dismissVisitorGate(page);
 
@@ -101,8 +122,12 @@ export async function getSeatCountsFromSchedule(cinemaSlug, theaterName, movieTi
             urlVisited: page.url(),
         };
     } catch (e) {
-        // snapshot on failure for Docker-only issues
-        try { await page.screenshot({ path: `/tmp/ce_gate_${Date.now()}.png`, fullPage: true }); } catch {}
+        try {
+            const ts = Date.now();
+            await page.screenshot({ path: `/tmp/ce_${ts}.png`, fullPage: true });
+            const html = await page.content();
+            await import('fs/promises').then(fs => fs.writeFile(`/tmp/ce_${ts}.html`, html));
+        } catch {}
         throw e;
     } finally {
         await page.close().catch(()=>{});

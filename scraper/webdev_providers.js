@@ -95,20 +95,6 @@ register(
         }
     );
 
-// No seats remaining, but auditorium
-    register(
-        ["Cinéma Carrefour du Nord Saint-Jérôme", "Cinema Carrefour du Nord Saint-Jerome"],
-        {
-            HORAIRE_URL:  "https://billetterie.cinemasteustache.ca/FR/horaire.awp?P1=01&P2=01&P3=",
-            PURCHASE_URL: "https://billetterie.cinemasteustache.ca/FR/Film-achat.awp",
-            markerPattern: /id="zrl_(\d+)_(?:A8|A9)"/g,
-            styleAnchors: ["margin-bottom:-1px"],
-            locateExpand: "row",
-            hooks: { postCleanTitle: _internal.cleaners.cleanAggressiveTitle },
-
-        }
-    )
-
 
 /* ------------------------------- Public API ------------------------------- */
 export function findWebdevProviderByName(theaterName){

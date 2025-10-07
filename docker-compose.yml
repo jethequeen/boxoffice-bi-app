@@ -1,5 +1,4 @@
 ﻿version: "3.9"
-
 services:
   seats-sold:
     build: .
@@ -9,26 +8,26 @@ services:
       - .env.txt
     environment:
       - TZ=America/Toronto
-      # daemon knobs
+      # make headless behave closer to your IDE:
+      - CE_ACCEPT_LANG=fr-CA,fr;q=0.9,en;q=0.8
+      - CE_BLOCK_ASSETS=0           # allow CSS/JS/images in Docker for stability
+      - CE_TIMEOUT_MS=60000         # more generous waits in container
+      - DEBUG=pw:api                # optional: verbose Playwright API logs
+      # your existing envs ↓
       - RESYNC_MIN=180
       - LOOKAHEAD_H=8
       - BACKPAD_MIN=30
       - FLUSH_MIN=60
       - FLUSH_BATCH=100
-      - CHECK_DELAY_SECVEN?=780   # if you renamed this, keep your real var name
+      - CHECK_DELAY_SEC=780
       - WINDOW_SEC=60
       - QUIET_START=01:00
       - QUIET_END=10:00
-
-      # Ensure no downloads at runtime
-      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-      - PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-      - PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chromium-from-pw
-      - PUPPETEER_CACHE_DIR=/home/pwuser/.cache/puppeteer
-
-      # Optional verbose scraping logs
-      # - WEBDEV_DEBUG=1
-
-    # Uncomment if you want host logs, etc.
-    # volumes:
-    #   - ./logs:/boxoffice-bi-app/logs
+    # Critical for Chromium in containers:
+    shm_size: "1gb"
+    # Persist browsers (already inside image) and any updates/caches:
+    volumes:
+      - msplaywright:/ms-playwright
+      # - ./logs:/app/logs   # if you want host logs
+volumes:
+  msplaywright:

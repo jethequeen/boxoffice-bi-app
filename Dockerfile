@@ -1,42 +1,40 @@
-﻿# Playwright 1.55.0 with browsers preinstalled
+﻿# Playwright image that ALREADY contains matching Chromium build
+# (match your package.json's "playwright": "1.55.x")
 FROM mcr.microsoft.com/playwright:v1.55.0-jammy
 
-ENV NODE_ENV=production \
-    TZ=America/Toronto \
+# Node is already installed in this image (v18 LTS). If you REQUIRE Node 20, uncomment:
+# RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends curl ca-certificates \
+#   && curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - \
+#   && sudo apt-get install -y nodejs && sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*
+
+ENV TZ=America/Toronto \
+    NODE_ENV=production \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
-    PUPPETEER_CACHE_DIR=/home/pwuser/.cache/puppeteer
+    LANG=fr_CA.UTF-8 \
+    LC_ALL=fr_CA.UTF-8
+
+# Fonts for proper text rendering (accents, emoji, etc.)
+RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+    locales tzdata fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
+    && sudo sed -i 's/# fr_CA.UTF-8 UTF-8/fr_CA.UTF-8 UTF-8/' /etc/locale.gen \
+    && sudo locale-gen \
+    && sudo rm -rf /var/lib/apt/lists/*
 
 WORKDIR /boxoffice-bi-app
 
-# Install prod deps first for better cache
+# Install deps with browsers already present in image
 COPY package*.json ./
 RUN npm ci --omit=dev
-
-# Ensure the runtime has the SAME Playwright version as the image,
-# regardless of your lockfile (no changes to your repo).
-RUN npm i --no-save playwright@1.55.0
 
 # Copy source
 COPY . .
 
-# --- Make puppeteer-core find a Chrome binary ---
-# Create a stable symlink to the Chromium that ships with the Playwright image.
-USER root
-RUN set -eux; \
-    CHROME_PATH="$(echo /ms-playwright/chromium-*/chrome-linux/chrome)"; \
-    ln -sf "${CHROME_PATH}" /usr/local/bin/chromium-from-pw; \
-    chown -h pwuser:pwuser /usr/local/bin/chromium-from-pw
+# Optional: sanity check that Chromium exists in the image
+RUN node -e "console.log('has browser?', require('fs').existsSync('/ms-playwright/chromium-*/chrome-linux'))"
 
-# Point Puppeteer to that Chromium
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chromium-from-pw
-
-# Drop privileges
+# Default user is 'pwuser' with proper permissions in base image
 USER pwuser
 
-# Optional healthcheck
-HEALTHCHECK --interval=1m --timeout=10s --start-period=30s --retries=3 \
-  CMD node -e "process.exit(0)" && npx playwright --version >/dev/null 2>&1 || exit 1
-
-# Run your daemon
+# Start your daemon
 CMD ["node", "cron/seatsSold.js"]
