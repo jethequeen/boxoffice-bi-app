@@ -75,36 +75,36 @@ function fmtLocalDateTime(iso){
 // ---- schema-aware CE upsert with fuzzy seat_count match (±tolerance) ----
 const CE_SEAT_TOLERANCE = parseInt(process.env.CE_SEAT_TOLERANCE || "10", 10);
 
-async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining, measured_at, source }) {
+async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining /* measured_at, source */ }) {
     if (capacity == null || seats_remaining == null) {
         return { wrote: false, reason: "missing capacity/seats_remaining" };
     }
 
-    // 1) Try exact match first
+    // 1) exact seat_count match
     let row;
     {
         const { rows } = await pgClient.query(
             `SELECT id AS screen_id, name, seat_count
-         FROM screens
-        WHERE theater_id = $1 AND seat_count = $2
-        ORDER BY name
-        LIMIT 1`,
+             FROM screens
+             WHERE theater_id = $1 AND seat_count = $2
+             ORDER BY name
+                 LIMIT 1`,
             [theater_id, capacity]
         );
         row = rows[0];
     }
 
-    // 2) If no exact match, try fuzzy within ±tolerance and pick the closest
+    // 2) fuzzy match within ± tolerance (closest first)
     let fuzzy = false;
     if (!row && CE_SEAT_TOLERANCE > 0) {
         const { rows } = await pgClient.query(
             `SELECT id AS screen_id, name, seat_count,
-              ABS(seat_count - $2) AS delta
-         FROM screens
-        WHERE theater_id = $1
-          AND seat_count BETWEEN ($2 - $3) AND ($2 + $3)
-        ORDER BY delta ASC, seat_count DESC, name
-        LIMIT 1`,
+                    ABS(seat_count - $2) AS delta
+             FROM screens
+             WHERE theater_id = $1
+               AND seat_count BETWEEN ($2 - $3) AND ($2 + $3)
+             ORDER BY delta ASC, seat_count DESC, name
+                 LIMIT 1`,
             [theater_id, capacity, CE_SEAT_TOLERANCE]
         );
         if (rows.length) {
@@ -116,18 +116,17 @@ async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, s
     if (!row) return { wrote: false, reason: "no screen with that seat_count (even fuzzy)" };
 
     const screen_id = row.screen_id;
-    // seats_sold computed from the actual screen's seat_count we picked
     const seats_sold_raw = (row.seat_count ?? 0) - (seats_remaining ?? 0);
     const seats_sold = Math.max(0, Math.min(row.seat_count ?? 0, seats_sold_raw));
 
-
-        await pgClient.query(
-            `UPDATE showings
-          SET screen_id = $2,
-              seats_sold = $3,
-        WHERE id = $1`,
-            [showing_id, screen_id, seats_sold|| 'cineentreprise']
-        );
+    // NOTE: only update the two columns you actually have; no trailing comma, correct param order
+    await pgClient.query(
+        `UPDATE showings
+         SET screen_id = $1,
+             seats_sold = $2
+         WHERE id = $3`,
+        [screen_id, seats_sold, showing_id]
+    );
 
     if (fuzzy && (process.env.LOG_LEVEL || "debug") === "debug") {
         console.warn("[flush/CE] fuzzy seat_count match", {
