@@ -221,6 +221,7 @@ async function addTicketsThenContinueFast(page, count = 1) {
     const modal = page.locator(SEL.addTicketsModal).first();
     await modal.waitFor({ state: 'visible', timeout: 20_000 });
 
+
 // ✅ good: CSS + hasText filter
     let row = modal.locator(SEL.ticketRow).filter({ hasText: /Adulte|Adult/i }).first();
     if (!(await row.count())) row = modal.locator(SEL.ticketRow).first();
