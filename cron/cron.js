@@ -50,7 +50,7 @@ await insertWeekendEstimates(weekendId, 13, 0.9);
 // also compute next weekend so Thursday previews show up there
 const fridayNext   = addDaysISO(fridayDate, 7);
 const weekendNext  = getWeekendId_YYYYWW(addDaysISO(fridayNext, 2));
-await insertWeekendEstimates(weekendNext, 13, 0.9);
+await insertWeekendEstimates(weekendNext, 13, 0.95);
 
 
 
