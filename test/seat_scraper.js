@@ -1,12 +1,14 @@
 ﻿#!/usr/bin/env node
 // Usage:
 //   node test/provider_runner.js --list
-//   node test/provider_runner.js "<Theater Name>" <YYYY-MM-DD> <HH:MM> "<Movie Title>" [--locationId=...] [--showtimesKey=...] [--movieTitle=...]
+//   node test/provider_runner.js "<Theater Name>" <YYYY-MM-DD> <HH:MM> "<Movie Title>" [--locationId=...] [--showtimesKey=...] [--movieTitle=...] [--showUrl=...]
+//   # URL-only mode (no positional args):
+//   node test/provider_runner.js --showUrl="https://billetterie.cinemasrgfm.com/FR/Film-achat.awp?P1=01&P2=02&P3=215069" --theater="Cinéma RGFM Drummondville" [--date=YYYY-MM-DD] [--time=HH:MM] [--title="..."]
 //
-// Examples (PowerShell):
-//   node test/provider_runner.js "Maison du Cinéma" 2025-10-06 18:45 "Avatar : La voie de l'eau"
-//   node test/provider_runner.js "Cinéma Saint-Eustache" 2025-10-06 12:50 "Le combattant VIP"
-//   node test/provider_runner.js "Cineplex Odeon Quartier Latin" 2025-10-06 19:30 "Dune: Part Two" --locationId=1234 --showtimesKey=abcd1234
+// Notes:
+// - Cineplex still needs --locationId and --showtimesKey.
+// - For WebDev no-seat providers you can pass --showUrl to probe directly.
+// - On Windows PowerShell, keep quotes around names/titles with spaces or accents.
 //
 import { getSeatsByTheater } from "../scraper/provider_registry.js";
 
@@ -19,27 +21,70 @@ function parseFlags(argv) {
     return out;
 }
 
+function todayISO() {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+}
+
 async function main() {
-    const [, , ...args] = process.argv;
+    const [, , ...argv] = process.argv;
 
+    // Quick "list" helper (stub)
+    if (argv.length === 1 && argv[0] === "--list") {
+        console.log(`(Tip) --list is not implemented in this script yet. Use your registry dumper or tests/test_webdev_cli.js if you have it.`);
+        process.exit(0);
+    }
 
-    if (args.length < 4) {
+    // Parse all flags once so we can support URL-only mode
+    const allFlags = parseFlags(argv.filter(x => x.startsWith("--")));
+
+    // MODE 3: URL-only probe (no positionals required)
+    // requires: --showUrl and --theater
+    if (allFlags.showUrl && (allFlags.theater || allFlags.t)) {
+        const theaterName = allFlags.theater || allFlags.t;
+        const dateISO = allFlags.date || todayISO();
+        const hhmm = allFlags.time || "00:00";
+        const title = (allFlags.title || allFlags.movieTitle || "(unknown)").trim();
+
+        const mainArgs = { dateISO, hhmm, title, showUrl: allFlags.showUrl };
+
+        try {
+            const rec = await getSeatsByTheater(theaterName, mainArgs, allFlags);
+            console.log("MATCH:", rec);
+        } catch (e) {
+            console.error("ERR:", e?.stack || e?.message || String(e));
+            process.exit(2);
+        }
+        return;
+    }
+
+    // MODE 1: Normal positional args (back-compat)
+    if (argv.length < 4) {
         console.log(`Usage:
   node test/provider_runner.js --list
-  node test/provider_runner.js "<Theater Name>" <YYYY-MM-DD> <HH:MM> "<Movie Title>" [--locationId=...] [--showtimesKey=...] [--movieTitle=...]
+  node test/provider_runner.js "<Theater Name>" <YYYY-MM-DD> <HH:MM> "<Movie Title>" [--locationId=...] [--showtimesKey=...] [--movieTitle=...] [--showUrl=...]
+  # URL-only mode:
+  node test/provider_runner.js --showUrl="https://.../Film-achat.awp?P1=..&P2=..&P3=.." --theater="Cinéma RGFM Drummondville" [--date=YYYY-MM-DD] [--time=HH:MM] [--title="..."]
 
 Notes:
-- For Cineplex, you MUST pass --locationId and --showtimesKey (we use your DB caching in the daemon; this CLI needs them explicitly).
-- On Windows PowerShell, keep quotes around names/titles with spaces or accents.`);
+- For Cineplex, pass --locationId and --showtimesKey.
+- For WebDev no-seat providers, --showUrl lets you probe directly without resolving from daily schedule.`);
         process.exit(1);
     }
 
-    const [theaterName, dateISO, hhmm, ...rest] = args;
+    // Positional flow:
+    const [theaterName, dateISO, hhmm, ...rest] = argv;
     const flags = parseFlags(rest.filter(x => x.startsWith("--")));
     const title = rest.filter(x => !x.startsWith("--")).join(" ").trim();
 
+    const mainArgs = { dateISO, hhmm, title };
+    if (flags.showUrl) mainArgs.showUrl = flags.showUrl;
+
     try {
-        const rec = await getSeatsByTheater(theaterName, { dateISO, hhmm, title }, flags);
+        const rec = await getSeatsByTheater(theaterName, mainArgs, flags);
         console.log("MATCH:", rec);
     } catch (e) {
         console.error("ERR:", e?.stack || e?.message || String(e));

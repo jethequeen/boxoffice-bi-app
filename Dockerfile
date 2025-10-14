@@ -43,4 +43,4 @@ COPY . .
 RUN chown -R pwuser:pwuser /boxoffice-bi-app
 USER pwuser
 
-CMD ["node", "cron/seatsSold.js"]
+CMD ["node", "cron/seatsSold_daemon.js"]

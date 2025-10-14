@@ -6,9 +6,9 @@ import https from "node:https";
 // ===== CONFIG =====
 const TARGET_URL =
     process.env.TARGET_URL ||
-    "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp?P1=01&P2=02&P3=212662";
+    "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp?P1=01&P2=03&P3=215856";
 
-const START_HIGH  = Number(process.env.START_HIGH || 300);
+const START_HIGH  = Number(process.env.START_HIGH || 150);
 const MIN_Q       = 1;
 const COOLDOWN_MS = Number(process.env.COOLDOWN_MS || 0);
 const EMAIL       = process.env.PROBE_EMAIL || "probe@example.com";
@@ -147,7 +147,7 @@ async function tryQ(cookie, q) {
 
     if (successUrl) {
         console.log("=== SUCCESS ===");
-        console.log("Q:", successQ - 1);         // as requested
+        console.log("Q:", successQ);         // as requested
         console.log("Confirm URL:", successUrl); // absolute, includes P4=…
     } else {
         console.log("No purchasable quantity found in the countdown window.");

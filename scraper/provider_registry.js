@@ -1,4 +1,4 @@
-﻿import {findWebdevProviderByName, getSeatsByName as getWebdevSeatsByName,} from "./webdev_providers.js";
+﻿import {findWebdevProviderByName, getSeatsByName} from "./webdev_providers.js";
 import {cinemathequeScrapeSeats} from "../insert/seats_sold_Cinematheque_quebecoise.js";
 import {scrapeSeatsOnly as cineplexScrapeSeats} from "../insert/insertAuditorium_cineplex.js";
 import {getSeatCountsFromSchedule as cineEntrepriseSeats} from "../scraper/cineEntreprise_horaire_scraper.js";
@@ -107,15 +107,25 @@ export function classifyTheaterName(theaterName) {
 }
 
 /* ------------------------------ public API ------------------------------ */
-export async function getSeatsByTheater(theaterName, { dateISO, hhmm, title }, context = {}) {
+
+export async function getSeatsByTheater(
+    theaterName,
+    { dateISO, hhmm, title, showUrl, theaterUrl },   // <— new optional args
+    context = {}
+) {
     const kind = classifyTheaterName(theaterName);
 
     if (kind === "webdev") {
-        return getWebdevSeatsByName(theaterName, { dateISO, hhmm, title });
+        // Forward everything; the webdev registry/provider should:
+        // - If showUrl present → parse that page directly (fast path)
+        // - Else resolve via schedule using { dateISO, hhmm, title, theaterUrl }
+        // - Throw { code: 'NO_SEAT_FLOW' } for non-seat sites
+        return getSeatsByName(theaterName, { dateISO, hhmm, title, showUrl, theaterUrl });
     }
 
     if (kind === "cinematheque") {
-        return cinemathequeScrapeSeats({ dateISO, hhmm, title });
+        // If they ever provide per-show URLs you can thread showUrl here, too.
+        return cinemathequeScrapeSeats({ dateISO, hhmm, title, showUrl, theaterUrl });
     }
 
     if (kind === "cineplex") {
@@ -123,12 +133,14 @@ export async function getSeatsByTheater(theaterName, { dateISO, hhmm, title }, c
         if (!locationId || !showtimesKey) {
             throw new Error("cineplex: missing { locationId, showtimesKey } in context");
         }
+        // Optionally: if you ever pass a Cineplex showUrl, add a fast-path here.
         return cineplexScrapeSeats({
             movieTitle: movieTitle ?? title,
             local_date: dateISO,
             local_time: hhmm,
             locationId,
             showtimesKey,
+            // showUrl // <- keep for future fast-path if supported
         });
     }
 
@@ -142,15 +154,17 @@ export async function getSeatsByTheater(theaterName, { dateISO, hhmm, title }, c
             })()
             : null;
 
-        return await cineEntrepriseSeats(
+        return cineEntrepriseSeats(
             slug,               // cinemaSlug
             theaterName,        // theater (for reporting)
             title,              // movieTitle (visible on card)
-            dayLabel,           // date label (not required today)
+            dayLabel,           // date label (string)
             hhmm,               // time
-            context.playwright  // optional { launch, ... } passthrough
+            context.playwright  // optional { launch, ... }
+            // showUrl, theaterUrl  // <- thread if CE adds a fast-path later
         );
     }
 
     throw new Error(`No provider mapping for "${theaterName}".`);
 }
+

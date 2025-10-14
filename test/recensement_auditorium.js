@@ -1,6 +1,6 @@
-﻿// test/webdev_auditorium_census.js
+﻿// test/recensement_auditorium.js
 // Snapshot today's showings for a WebDev theatre and write a CSV of measurements.
-// Usage: node test/webdev_auditorium_census.js "Cinéma Saint-Eustache"
+// Usage: node test/recensement_auditorium.js "Cinéma Saint-Eustache"
 
 import fs from "node:fs/promises";
 import path from "node:path";

@@ -1,13 +1,4 @@
-﻿/* Generic WebDev (PC Soft) ticketing scraper core.
-   Build per-provider instances with makeWebDevProvider({
-     HORAIRE_URL, PURCHASE_URL,
-     markerPattern?,           // default: /id="zrl_(\d+)_A9"/g
-     styleAnchors?,            // e.g., ['margin-bottom:-1px']
-     locateExpand? ,           // 'row' | 'table' (default 'table')
-     hooks?: { locateBlock?, postCleanTitle? }
-   })
-*/
-
+﻿
 /* ------------------------------- small utils ------------------------------- */
 function decodeEntities(s = "") {
     return s
@@ -258,7 +249,7 @@ function locateByStyleOrMarker(html, indexInHtml, {
 function defaultPostCleanTitle(title) { return title; }
 
 /* ---------------------------------- parsing -------------------------------- */
-function parseHoraire(html, {
+export function parseHoraire(html, {
     PURCHASE_URL,
     markerPattern = /id="zrl_(\d+)_A9"/g,
     hooks = {},
@@ -379,38 +370,6 @@ function parsePurchase(html) {
         time: t,
         headerLine: h || null,
     };
-}
-
-/* -------------------------------- fetch helpers ----------------------------- */
-async function fetchWithRetry(url, {
-    method = "GET",
-    headers = {},
-    body = undefined,
-    attempts = 3,
-    minDelay = 250,
-    maxDelay = 900,
-} = {}) {
-    let lastErr;
-    for (let i = 0; i < attempts; i++) {
-        try {
-            const res = await fetch(url, {
-                method,
-                body,
-                headers,
-                redirect: "follow",
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return await res.text();
-        } catch (e) {
-            lastErr = e;
-            // jittered backoff on network errors
-            if (i < attempts - 1) {
-                const delay = Math.floor(minDelay + Math.random() * (maxDelay - minDelay));
-                await new Promise(r => setTimeout(r, delay));
-            }
-        }
-    }
-    throw lastErr;
 }
 
 /* ---------------------------- Provider factory API -------------------------- */

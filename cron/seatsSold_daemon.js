@@ -1,13 +1,14 @@
-﻿// daemon/seats_heap_daemon.js
+﻿// daemon/seatsSold_daemon.js
 import { setGlobalDispatcher, Agent } from "undici";
 import { getClient } from "../db/client.js";
 import { getShowtimesKeyFromTheatreUrl, upsertSeatsSoldFromMeasurement } from "../insert/insertAuditorium_cineplex.js";
 import { getSeatsByTheater, classifyTheaterName } from "../scraper/provider_registry.js";
+import {runNightPrefillWebdev} from "./billeterie_schedule.js";
 
 /* ---------- Hardcoded config (no envs) ---------- */
 const TZ               = "America/Toronto";
 const RESYNC_MIN       = 180;
-const LOOKAHEAD_H      = 8;
+const LOOKAHEAD_H      = 4;
 const BACKPAD_MIN      = 15;
 const FLUSH_MIN        = 60;
 const FLUSH_BATCH      = 100;
@@ -15,11 +16,11 @@ const SCRAPE_CONC      = 6;
 const UPSERT_CONC      = 8;
 const KEY_CACHE_TTL_MS = 60*60*1000;
 const QUIET_START      = "01:00"; // inclusive
-const QUIET_END        = "10:00"; // exclusive
+const QUIET_END        = "09:30"; // exclusive
 const LOG_LEVEL        = "info";
 
 /* ---------- Tick cadence & window safety ---------- */
-const TICK_MS = 30_000;
+const TICK_MS = 15_000;
 const MIN_SPAN_SEC = Math.max(60, Math.ceil(TICK_MS/1000) + 15); // ensure window >= ~45–60s
 
 /* ---------- Provider windows: relative to show start (in seconds) ----------
@@ -30,11 +31,12 @@ const MIN_SPAN_SEC = Math.max(60, Math.ceil(TICK_MS/1000) + 15); // ensure windo
    Adjust others as you like.
 --------------------------------------------------------------------------- */
 const PROVIDER_WINDOWS = {
-    cineentreprise: { windowStartSec: -7 * 60, windowEndSec: 0 },
-    cineplex:       { windowStartSec: 12 * 60, windowEndSec: 15 * 60 },
-    webdev:         { windowStartSec:  7 * 60, windowEndSec: 11 * 60 },
-    cinematheque:   { windowStartSec: -7 * 60, windowEndSec: -1 * 60 },
+    cineentreprise: { windowStartSec: -(7*60 + 15), windowEndSec: 0 },        // -7:15 .. 0:00
+    cineplex:       { windowStartSec:  (12*60 + 30), windowEndSec: (15*60+30)},// +12:30 .. +15:30
+    webdev:         { windowStartSec:  (13*60 + 45), windowEndSec: (16*60+45)},// +13:45 .. +16:45
+    cinematheque:   { windowStartSec: -(7*60),       windowEndSec: -(60)    },// -7:00 .. -1:00
 };
+
 const DEFAULT_WINDOW = { windowStartSec: 12 * 60, windowEndSec: 17 * 60 };
 
 function normalizeWindow(w) {
@@ -162,14 +164,19 @@ async function syncFromDb() {
                 s.start_at,
                 t.theater_api_id              AS location_id,
                 t.showings_url                AS theatre_url,
-                t.name                        AS theater_name
+                s.purchase_url,
+                t.name                        AS theater_name,
+                s.screen_id,
+                sc.seat_count                 AS screen_seat_count
             FROM showings s
                      JOIN theaters t ON t.id = s.theater_id
                      JOIN movies   m ON m.id = s.movie_id
+                     LEFT JOIN screens sc ON sc.id = s.screen_id
             WHERE s.seats_sold IS NULL
               AND s.start_at BETWEEN (now() - make_interval(mins => $1))
                 AND (now() + make_interval(hours => $2))
             ORDER BY s.start_at
+
         `, [BACKPAD_MIN, LOOKAHEAD_H]);
 
         const now = Date.now();
@@ -203,12 +210,14 @@ async function syncFromDb() {
                 const payload = {
                     provider,
                     showing_id: r.showing_id,
+                    purchase_url: r.purchase_url,
                     movie_id:   r.movie_id,
                     theater_id: r.theater_id,
                     theater_name: name,
                     movieTitle: r.movie_title,
                     local_date,
                     local_time,
+                    seat_count: r.screen_seat_count ?? null,
                 };
                 if (provider === "cineplex") {
                     const got = theaterKeyCache.get(r.theater_id);
@@ -258,7 +267,13 @@ async function tick() {
             try {
                 const rec = await getSeatsByTheater(
                     p.theater_name,
-                    { dateISO: p.local_date, hhmm: p.local_time, title: p.movieTitle },
+                    {
+                        dateISO: p.local_date,
+                        hhmm:    p.local_time,
+                        title:   p.movieTitle,
+                        showUrl: p.purchase_url,
+                        ...(p.seat_count != null ? { expectedCapacity: p.seat_count } : {})
+                    },
                     p.provider === "cineplex"
                         ? { locationId: p.locationId, showtimesKey: p.showtimesKey, movieTitle: p.movieTitle }
                         : undefined
@@ -314,7 +329,7 @@ async function flush(force=false) {
                     return;
                 }
 
-                if (m.seats_remaining == null || m.auditorium == null) {
+                if (m.seats_remaining == null) {
                     skipped++;
                     if (LOG_LEVEL === "debug") console.warn("[flush] skip (missing seats/aud)", m);
                     return;
@@ -347,6 +362,23 @@ async function main() {
     setInterval(() => { if (!inQuietHours()) syncFromDb().catch(e => console.error("[sync] error", e)); }, RESYNC_MIN * 60 * 1000);
     setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, TICK_MS);
     setInterval(() => { if (!inQuietHours()) flush(false).catch(e => console.error("[flush] error", e)); }, FLUSH_MIN * 60 * 1000);
+    setInterval(tryNightPrefill, 6 * 60 * 60 * 1000);  // every 6 hours, only runs during quiet hours
+
+    async function tryNightPrefill(){
+        if (inQuietHours()) {
+            try {
+                await runNightPrefillWebdev({
+                    allowTheaters: ["Cinéma RGFM Drummondville", "Cinéma RGFM Beloeil"],
+                    dryRun: false  // set true the first time if you want to see logs only
+                });
+            } catch(e){
+                console.warn("[prefill] error:", e?.message || e);
+            }
+        }
+    }
+
+
+
 
     const shutdown = async () => { try { await flush(true); } finally { process.exit(0); } };
     process.on("SIGINT", shutdown);
