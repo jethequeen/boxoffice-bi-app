@@ -325,11 +325,12 @@ export async function upsertSeatsSold({
         `
       INSERT INTO showings (movie_id, theater_id, start_at, date, screen_id, seats_sold)
       VALUES ($1, $2, $3::timestamptz, $4::date, $5, $6)
-      ON CONFLICT (movie_id, theater_id, start_at, date)
-        DO UPDATE SET
-          screen_id = EXCLUDED.screen_id,
-          seats_sold = EXCLUDED.seats_sold,
-          scraped_at = now()
+          ON CONFLICT (movie_id, theater_id, start_at, date)
+  DO UPDATE SET
+          screen_id = COALESCE(showings.screen_id, EXCLUDED.screen_id),
+                   seats_sold = EXCLUDED.seats_sold,
+                   scraped_at = now()
+
       RETURNING *
     `,
         [movie_id, theater_id, start_at, local_date, screen_id, seats_sold]
@@ -408,16 +409,23 @@ export async function upsertSeatsSoldFromMeasurement({
     const remaining  = Number(seats_remaining);
     const seats_sold = Math.max(0, capacity - remaining);
 
-    // Simple update by primary key (showings.id)
     await pgClient.query(
         `UPDATE showings
-       SET screen_id = $1,
-           seats_sold = $2,
-           scraped_at = now()
-     WHERE id = $3
-       AND (seats_sold IS DISTINCT FROM $2 OR screen_id IS DISTINCT FROM $1)`,
-        [screen_id, seats_sold, showing_id]
+         SET seats_sold = $1,
+             scraped_at = now()
+         WHERE id = $2
+           AND seats_sold IS DISTINCT FROM $1`,
+        [seats_sold, showing_id]
     );
+
+    await pgClient.query(
+        `UPDATE showings
+     SET screen_id = $1
+   WHERE id = $2
+     AND screen_id IS NULL`,
+        [screen_id, showing_id]
+    );
+
 
     return { theater_id, movie_id, screen_id, auditorium: auditoriumRaw, capacity, remaining, seats_sold };
 }
