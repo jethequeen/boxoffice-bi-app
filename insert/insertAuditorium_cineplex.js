@@ -356,15 +356,55 @@ export async function upsertSeatsSold({
  */
 export async function upsertSeatsSoldFromMeasurement({
                                                          pgClient,
-                                                         measurement, // { showing_id, theater_id, movie_id, auditorium, seats_remaining }
+                                                         measurement, // { showing_id, theater_id, movie_id, auditorium, seats_remaining, source }
                                                      }) {
-    const { showing_id, theater_id, movie_id, auditorium, seats_remaining } = measurement;
+    const { showing_id, theater_id, movie_id, auditorium, seats_remaining, source } = measurement;
 
     if (seats_remaining == null) {
-        throw new Error(`measurement has null seats_remaining for showing_id=${showing_id}`);
+        // don't break the batch; just stamp scraped_at
+        await pgClient.query(`UPDATE showings SET scraped_at = now() WHERE id = $1`, [showing_id]);
+        return { theater_id, movie_id, screen_id: null, auditorium: null, capacity: null, remaining: null, seats_sold: null };
     }
 
     const auditoriumRaw = (auditorium || "").trim();
+
+    // For noseats providers or when we don't have an auditorium:
+    // - do NOT attempt to map a screen
+    // - if a screen is already set on the showing, use its capacity to compute seats_sold
+    if (!auditoriumRaw || source === 'webdev') {
+        const q = await pgClient.query(
+            `SELECT s.screen_id, sc.seat_count
+             FROM showings s
+                      LEFT JOIN screens sc ON sc.id = s.screen_id
+             WHERE s.id = $1
+                 LIMIT 1`,
+            [showing_id]
+        );
+
+        const row = q.rows[0];
+        if (row && row.seat_count != null) {
+            const capacity   = Number(row.seat_count) || 0;
+            const remaining  = Number(seats_remaining);
+            const seats_sold = Math.max(0, capacity - remaining);
+
+            await pgClient.query(
+                `UPDATE showings
+            SET seats_sold = $1,
+                scraped_at = now()
+          WHERE id = $2
+            AND seats_sold IS DISTINCT FROM $1`,
+                [seats_sold, showing_id]
+            );
+
+            return { theater_id, movie_id, screen_id: row.screen_id, auditorium: null, capacity, remaining, seats_sold };
+        }
+
+        // No screen assigned yet -> just stamp scraped_at; do not fail
+        await pgClient.query(`UPDATE showings SET scraped_at = now() WHERE id = $1`, [showing_id]);
+        return { theater_id, movie_id, screen_id: null, auditorium: null, capacity: null, remaining: Number(seats_remaining), seats_sold: null };
+    }
+
+    // === From here on, we DO have an auditorium and may map a screen ===
     const audNorm = normalizeAudName(auditoriumRaw);
     const audDigits = extractDigits(auditoriumRaw);
 
@@ -395,13 +435,18 @@ export async function upsertSeatsSoldFromMeasurement({
     // 3) ILIKE fallback
     if (res.rowCount === 0) {
         res = await pgClient.query(
-            `SELECT id, name, seat_count FROM screens WHERE theater_id = $1 AND name ILIKE $2 ORDER BY LENGTH(name) ASC LIMIT 1`,
+            `SELECT id, name, seat_count FROM screens
+        WHERE theater_id = $1 AND name ILIKE $2
+        ORDER BY LENGTH(name) ASC
+        LIMIT 1`,
             [theater_id, `%${auditoriumRaw}%`]
         );
     }
 
+    // If still nothing, DO NOT throw — just stamp scraped_at and return
     if (res.rowCount === 0) {
-        throw new Error(`No screen matched auditorium="${auditoriumRaw}" in theater_id=${theater_id}`);
+        await pgClient.query(`UPDATE showings SET scraped_at = now() WHERE id = $1`, [showing_id]);
+        return { theater_id, movie_id, screen_id: null, auditorium: auditoriumRaw, capacity: null, remaining: Number(seats_remaining), seats_sold: null };
     }
 
     const screen_id  = res.rows[0].id;
@@ -409,23 +454,24 @@ export async function upsertSeatsSoldFromMeasurement({
     const remaining  = Number(seats_remaining);
     const seats_sold = Math.max(0, capacity - remaining);
 
+    // Update seats_sold (idempotent)
     await pgClient.query(
         `UPDATE showings
-         SET seats_sold = $1,
-             scraped_at = now()
-         WHERE id = $2
-           AND seats_sold IS DISTINCT FROM $1`,
+        SET seats_sold = $1,
+            scraped_at = now()
+      WHERE id = $2
+        AND seats_sold IS DISTINCT FROM $1`,
         [seats_sold, showing_id]
     );
 
+    // Set screen only if currently null (write-once semantics)
     await pgClient.query(
         `UPDATE showings
-     SET screen_id = $1
-   WHERE id = $2
-     AND screen_id IS NULL`,
+         SET screen_id = $1
+         WHERE id = $2
+           AND screen_id IS NULL`,
         [screen_id, showing_id]
     );
-
 
     return { theater_id, movie_id, screen_id, auditorium: auditoriumRaw, capacity, remaining, seats_sold };
 }

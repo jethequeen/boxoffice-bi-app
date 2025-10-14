@@ -121,13 +121,21 @@ async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, s
     const seats_sold_raw = (row.seat_count ?? 0) - (seats_remaining ?? 0);
     const seats_sold = Math.max(0, Math.min(row.seat_count ?? 0, seats_sold_raw));
 
-    // NOTE: only update the two columns you actually have; no trailing comma, correct param order
+// write seats_sold
     await pgClient.query(
         `UPDATE showings
-         SET screen_id = $1,
-             seats_sold = $2
-         WHERE id = $3`,
-        [screen_id, seats_sold, showing_id]
+         SET seats_sold = $1
+         WHERE id = $2`,
+        [seats_sold, showing_id]
+    );
+
+// set screen only if it's not already set (tolerant, write-once)
+    await pgClient.query(
+        `UPDATE showings
+     SET screen_id = $1
+   WHERE id = $2
+     AND screen_id IS NULL`,
+        [screen_id, showing_id]
     );
 
     if (fuzzy && (process.env.LOG_LEVEL || "debug") === "debug") {
