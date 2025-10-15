@@ -409,18 +409,27 @@ export function createGenericNoSeatsProvider({
                 }
             }
 
+            // Fallback behavior requested:
+            // If webdev no-seats provider would have returned 0 remaining (probe failure),
+            // act as if exactly 1 ticket has been sold from seats_max:
+            // seats_max = expectedCapacity (if given) else (eff.startHigh + 1).
             if (successQ == null) {
-                // nothing purchasable at (minQ+1); treat as zero remaining (conservative)
+                const seatsMax = (typeof expectedCapacity === "number" && expectedCapacity > 0)
+                    ? expectedCapacity
+                    : (eff.startHigh + 1);
+                const seatsRemainingFallback = Math.max(0, seatsMax - 1);
                 return {
                     auditorium:      null,
-                    seats_remaining: 0,
+                    seats_remaining: seatsRemainingFallback,
                     sellable:        null,
                     source:          "webdev",
                     url:             showUrl,
                     p3:              p3FromUrl(showUrl),
                     raw: {
-                        reason: "no_confirm_redirect",
+                        reason: "fallback_one_sold_on_probe_failure",
                         dateISO, hhmm, title,
+                        seats_max: seatsMax,
+                        computed_fallback_seats_remaining: seatsRemainingFallback,
                         probed_from: eff.startHigh,
                         minQ: eff.minQ
                     }
@@ -445,6 +454,7 @@ export function createGenericNoSeatsProvider({
                 }
             };
         },
+
         // NEW: single-candidate probe (no loop inside)
         async probeCapacityCandidate({ showUrl }, candidate, { session } = {}) {
             if (!showUrl) {
@@ -455,6 +465,7 @@ export function createGenericNoSeatsProvider({
             const { cookie } = session || {};
             return await probeCandidateOnce({ showUrl, candidate, origin: base, cookie });
         },
+
         // NEW: create a reusable cookie/session for multiple probes on the same show
         async createPurchaseSession({ showUrl }) {
             if (!showUrl) {
