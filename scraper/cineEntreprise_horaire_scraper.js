@@ -1,5 +1,4 @@
-﻿// cineEntreprise_fromSchedule.fast.js
-import { chromium } from 'playwright';
+﻿//import { chromium } from 'playwright';
 
 const SEL = {
     cookieAccept: 'button[data-cky-tag="accept-button"], .cky-btn-accept',

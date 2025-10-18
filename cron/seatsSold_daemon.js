@@ -1,4 +1,4 @@
-﻿// daemon/seatsSold_daemon.js
+﻿// cron/seatsSold_daemon.js
 import { setGlobalDispatcher, Agent } from "undici";
 import { getClient } from "../db/client.js";
 import { getShowtimesKeyFromTheatreUrl, upsertSeatsSoldFromMeasurement } from "../insert/insertAuditorium_cineplex.js";
@@ -79,7 +79,7 @@ function fmtLocalDateTime(iso){
 // ---- schema-aware CE upsert with fuzzy seat_count match (±tolerance) ----
 const CE_SEAT_TOLERANCE = parseInt(process.env.CE_SEAT_TOLERANCE || "10", 10);
 
-async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining /* measured_at, source */ }) {
+/*async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining /!* measured_at, source *!/ }) {
     if (capacity == null || seats_remaining == null) {
         return { wrote: false, reason: "missing capacity/seats_remaining" };
     }
@@ -151,7 +151,7 @@ async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, s
     }
 
     return { wrote: true, screen_id, seats_sold };
-}
+}*/
 
 
 /* ---------- State ---------- */
