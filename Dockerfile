@@ -5,6 +5,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=fr_CA.UTF-8 \
     LC_ALL=fr_CA.UTF-8 \
     NODE_ENV=production \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+    PUPPETEER_SKIP_DOWNLOAD=0
 
 WORKDIR /boxoffice-bi-app
 
