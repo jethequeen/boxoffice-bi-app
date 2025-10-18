@@ -2,18 +2,27 @@
 import { makeWebDevProvider, _internal } from "./billeterie_webdev_generique.js";
 import { createGenericNoSeatsProvider } from "./webdev_generic_schedule.js";
 
-function normName(s=""){
-    return String(s).normalize("NFD").replace(/\p{Diacritic}/gu,"").toLowerCase().replace(/\s+/g," ").trim();
+function normName(s = "") {
+    return String(s)
+        .normalize("NFD")
+        .replace(/\p{Diacritic}/gu, "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim();
 }
+
 const WEBDEV_BY_NAME = new Map();
+const WINDOW_BY_NAME = new Map(); // normName(theater) -> { windowStartSec, windowEndSec }
 
 function normType(t) {
-    const x = String(t || "displayingSeats").toLowerCase().replace(/\s|[_-]/g, "");
-    if (["noseat","noseats","notdisplayingseats"].includes(x)) return "notDisplayingSeats";
+    const x = String(t || "displayingSeats")
+        .toLowerCase()
+        .replace(/\s|[_-]/g, "");
+    if (["noseat", "noseats", "notdisplayingseats"].includes(x)) return "notDisplayingSeats";
     return "displayingSeats";
 }
 
-function ensureBase(cfg){
+function ensureBase(cfg) {
     if (cfg.BASE) return cfg;
     const u = new URL(cfg.HORAIRE_URL);
     return { ...cfg, BASE: u.origin };
@@ -21,11 +30,11 @@ function ensureBase(cfg){
 
 function register(theaterNames, cfg) {
     const names = Array.isArray(theaterNames) ? theaterNames : [theaterNames];
-    const type  = normType(cfg.type);
-    const full  = ensureBase(cfg);
+    const type = normType(cfg.type);
+    const full = ensureBase(cfg);
 
     // Build both implementations
-    const lister       = createGenericNoSeatsProvider(full);                 // has getSchedule, getSeats (probe), probeCapacityCandidate, createPurchaseSession
+    const lister = createGenericNoSeatsProvider(full); // has getSchedule, getSeats (probe), probeCapacityCandidate, createPurchaseSession
     const seatProvider = (type === "displayingSeats") ? makeWebDevProvider(full) : null;
 
     const provider = {
@@ -44,7 +53,7 @@ function register(theaterNames, cfg) {
                 if (!seatProvider || typeof seatProvider.getSeats !== "function") {
                     throw new Error(`webdev: "${type}" provider is missing getSeats() implementation`);
                 }
-                return seatProvider.getSeats(args);  // seat-map flow
+                return seatProvider.getSeats(args); // seat-map flow
             }
             // notDisplayingSeats → lister’s probe flow (expects showUrl)
             if (lister && typeof lister.getSeats === "function") return lister.getSeats(args);
@@ -52,16 +61,36 @@ function register(theaterNames, cfg) {
         },
 
         // ✅ pass-through the new methods from the lister so cron can call them
-        probeCapacityCandidate: (lister && typeof lister.probeCapacityCandidate === "function")
-            ? lister.probeCapacityCandidate
-            : undefined,
+        probeCapacityCandidate:
+            (lister && typeof lister.probeCapacityCandidate === "function")
+                ? lister.probeCapacityCandidate
+                : undefined,
 
-        createPurchaseSession: (lister && typeof lister.createPurchaseSession === "function")
-            ? lister.createPurchaseSession
-            : undefined,
+        createPurchaseSession:
+            (lister && typeof lister.createPurchaseSession === "function")
+                ? lister.createPurchaseSession
+                : undefined,
     };
 
-    for (const n of names) WEBDEV_BY_NAME.set(normName(n), provider);
+    // Register provider + optional per-theater window override
+    for (const n of names) {
+        const key = normName(n);
+        WEBDEV_BY_NAME.set(key, provider);
+
+        // Optional per-theater scraping window override (in seconds, relative to show start)
+        // Accept either `window` or legacy `scrapeWindow` in cfg.
+        const perWin = cfg.window || cfg.scrapeWindow;
+        if (
+            perWin &&
+            Number.isInteger(perWin.windowStartSec) &&
+            Number.isInteger(perWin.windowEndSec)
+        ) {
+            WINDOW_BY_NAME.set(key, {
+                windowStartSec: perWin.windowStartSec,
+                windowEndSec: perWin.windowEndSec,
+            });
+        }
+    }
 }
 
 
@@ -73,6 +102,7 @@ register(
         type: "displayingSeats",
         HORAIRE_URL:  "https://billets.lamaisonducinema.com/FR/horaire.awp?P1=01&P2=01",
         PURCHASE_URL: "https://billets.lamaisonducinema.com/FR/Film-achat.awp",
+        window: { windowStartSec: (7 * 60), windowEndSec: 10 * 60 },
     }
 );
 
@@ -83,6 +113,7 @@ register(
         type: "displayingSeats",
         HORAIRE_URL: "https://billetterie.cinemabeaubien.com/FR/horaire.awp?P1=01&P2=01",
         PURCHASE_URL: "https://billetterie.cinemabeaubien.com/FR/Film-achat.awp",
+        window: { windowStartSec: (7 * 60), windowEndSec: 10 * 60 },
     }
 );
 
@@ -93,6 +124,7 @@ register(
         type: "displayingSeats",
         HORAIRE_URL: "https://billetterie.cinemaduparc.com/FR/horaire.awp?P1=01&P2=02",
         PURCHASE_URL: "https://billetterie.cinemaduparc.com/FR/Film-achat.awp",
+        window: { windowStartSec: (7 * 60), windowEndSec: 10 * 60 },
     }
 );
 register(
@@ -101,6 +133,7 @@ register(
         type: "displayingSeats",
         HORAIRE_URL: "https://billetterie.cinemaduparc.com/FR/horaire.awp?P1=01&P2=03",
         PURCHASE_URL: "https://billetterie.cinemaduparc.com/FR/Film-achat.awp",
+        window: { windowStartSec: (7 * 60), windowEndSec: 10 * 60 },
     }
 );
 
@@ -114,8 +147,9 @@ register(
         styleAnchors: ["margin-bottom:-1px"],
         locateExpand: "row",
         hooks: { postCleanTitle: _internal.cleaners.cleanAggressiveTitle },
-        }
-    );
+        window: { windowStartSec: (7 * 60), windowEndSec: 10 * 60 },
+    }
+);
 
 
 /* ---------------------- Without Seats ---------------------- */
@@ -126,6 +160,7 @@ register(["Cinéma RGFM Drummondville"], {
     PURCHASE_URL: "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp",
     BASE:         "https://billetterie.cinemasrgfm.com",
     hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
+    // (No window override here → daemon will use provider default for webdev)
 });
 
 register(["Cinéma RGFM Beloeil"], {
@@ -134,6 +169,7 @@ register(["Cinéma RGFM Beloeil"], {
     PURCHASE_URL: "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp",
     BASE:         "https://billetterie.cinemasrgfm.com",
     hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
+    // (No window override → provider default)
 });
 
 register(["Cinéma Magog"], {
@@ -165,11 +201,11 @@ register(["Cinéma Pine Sainte-Adèle"], {
 
 
 /* ----------------------------- Public API ----------------------------- */
-export function findWebdevProviderByName(theaterName){
+export function findWebdevProviderByName(theaterName) {
     return WEBDEV_BY_NAME.get(normName(theaterName)) || null;
 }
 
-export async function getScheduleByName(theaterName, { dateISO, dump=false }){
+export async function getScheduleByName(theaterName, { dateISO, dump = false }) {
     const p = findWebdevProviderByName(theaterName);
     if (!p) throw new Error(`webdev: no provider configured for "${theaterName}"`);
     if (typeof p.getSchedule !== "function") {
@@ -177,7 +213,8 @@ export async function getScheduleByName(theaterName, { dateISO, dump=false }){
     }
     return p.getSchedule({ dateISO, dump });
 }
-export async function getSeatsByName(theaterName, args){
+
+export async function getSeatsByName(theaterName, args) {
     const p = findWebdevProviderByName(theaterName);
     if (!p) throw new Error(`webdev: no provider configured for "${theaterName}"`);
     if (typeof p.getSeats !== "function") {
@@ -186,6 +223,11 @@ export async function getSeatsByName(theaterName, args){
     return p.getSeats(args);
 }
 
-export function listWebdevTheaters(){
+export function listWebdevTheaters() {
     return Array.from(WEBDEV_BY_NAME.keys()).sort();
+}
+
+// New: per-theater window lookup (daemon uses this to override provider default for webdev)
+export function getWebdevWindowForTheater(theaterName) {
+    return WINDOW_BY_NAME.get(normName(theaterName)) || null;
 }

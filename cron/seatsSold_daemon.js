@@ -4,6 +4,8 @@ import { getClient } from "../db/client.js";
 import { getShowtimesKeyFromTheatreUrl, upsertSeatsSoldFromMeasurement } from "../insert/insertAuditorium_cineplex.js";
 import { getSeatsByTheater, classifyTheaterName } from "../scraper/provider_registry.js";
 import {runNightPrefillWebdev} from "./billeterie_schedule.js";
+import { exec } from "child_process";
+import { getWebdevWindowForTheater } from "../scraper/webdev_providers.js";
 
 /* ---------- Hardcoded config (no envs) ---------- */
 const TZ               = "America/Toronto";
@@ -208,7 +210,12 @@ async function syncFromDb() {
                 }
             }
 
-            const base = normalizeWindow(PROVIDER_WINDOWS[provider] || DEFAULT_WINDOW);
+            let base = PROVIDER_WINDOWS[provider] || DEFAULT_WINDOW;
+            if (provider === "webdev") {
+                const override = getWebdevWindowForTheater(name);
+                if (override) base = override;
+            }
+            base = normalizeWindow(base);
             const startMs = new Date(r.start_at).getTime();
             const winStart = startMs + base.windowStartSec * 1000; // when we BEGIN scraping
             const winEnd   = startMs + base.windowEndSec   * 1000; // when we STOP scraping
@@ -363,6 +370,16 @@ async function flush(force=false) {
     }
 }
 
+async function cleanTmp() {
+    exec(
+        `find /tmp -xdev -type f -mmin +90 \
+     ! -name '*.lock' ! -name '*.pid' -delete`,
+        err => { if (err) console.warn("[cleanup] /tmp:", err.message); }
+    );
+}
+
+
+
 /* ---------- Scheduling ---------- */
 async function main() {
     if (!inQuietHours()) await syncFromDb();
@@ -371,6 +388,8 @@ async function main() {
     setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, TICK_MS);
     setInterval(() => { if (!inQuietHours()) flush(false).catch(e => console.error("[flush] error", e)); }, FLUSH_MIN * 60 * 1000);
     setInterval(tryNightPrefill, 6 * 60 * 60 * 1000);  // every 6 hours, only runs during quiet hours
+    // Call this every few hours (e.g. once per flush)
+    setInterval(cleanTmp,  60 * 60 * 1000);
 
     async function tryNightPrefill(){
         if (inQuietHours()) {
