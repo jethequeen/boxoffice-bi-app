@@ -21,7 +21,3 @@ services:
       - QUIET_START=01:00
       - QUIET_END=10:00
     shm_size: "1gb"
-    volumes:
-      - msplaywright:/ms-playwright
-volumes:
-  msplaywright:

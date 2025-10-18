@@ -160,7 +160,6 @@ register(["Cinéma RGFM Drummondville"], {
     PURCHASE_URL: "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp",
     BASE:         "https://billetterie.cinemasrgfm.com",
     hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
-    // (No window override here → daemon will use provider default for webdev)
 });
 
 register(["Cinéma RGFM Beloeil"], {
@@ -169,8 +168,8 @@ register(["Cinéma RGFM Beloeil"], {
     PURCHASE_URL: "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp",
     BASE:         "https://billetterie.cinemasrgfm.com",
     hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
-    // (No window override → provider default)
 });
+
 
 register(["Cinéma Magog"], {
     type: "notDisplayingSeats",

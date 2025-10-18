@@ -11,7 +11,7 @@ import { getWebdevWindowForTheater } from "../scraper/webdev_providers.js";
 const TZ               = "America/Toronto";
 const RESYNC_MIN       = 180;
 const LOOKAHEAD_H      = 4;
-const BACKPAD_MIN      = 1;
+const BACKPAD_MIN      = 15;
 const FLUSH_MIN        = 60;
 const FLUSH_BATCH      = 100;
 const SCRAPE_CONC      = 6;
