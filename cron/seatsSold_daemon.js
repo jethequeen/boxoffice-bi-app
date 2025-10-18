@@ -1,4 +1,4 @@
-﻿// daemon/seatsSold_daemon.js
+﻿// cron/seatsSold_daemon.js
 import { setGlobalDispatcher, Agent } from "undici";
 import { getClient } from "../db/client.js";
 import { getShowtimesKeyFromTheatreUrl, upsertSeatsSoldFromMeasurement } from "../insert/insertAuditorium_cineplex.js";
