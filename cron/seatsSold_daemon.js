@@ -11,7 +11,7 @@ import { getWebdevWindowForTheater } from "../scraper/webdev_providers.js";
 const TZ               = "America/Toronto";
 const RESYNC_MIN       = 180;
 const LOOKAHEAD_H      = 4;
-const BACKPAD_MIN      = 15;
+const BACKPAD_MIN      = 1;
 const FLUSH_MIN        = 60;
 const FLUSH_BATCH      = 100;
 const SCRAPE_CONC      = 6;
@@ -30,7 +30,6 @@ const MIN_SPAN_SEC = Math.max(60, Math.ceil(TICK_MS/1000) + 15); // ensure windo
    Examples:
    - CE:  -7m ..  0m   (seven minutes before up to showtime)
    - CX: +12m .. +15m  (twelve minutes after up to fifteen after)
-   Adjust others as you like.
 --------------------------------------------------------------------------- */
 const PROVIDER_WINDOWS = {
     cineentreprise: { windowStartSec: -(7*60 + 15), windowEndSec: 0 },        // -7:15 .. 0:00
