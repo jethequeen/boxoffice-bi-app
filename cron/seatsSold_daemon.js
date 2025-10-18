@@ -78,7 +78,7 @@ function fmtLocalDateTime(iso){
 // ---- schema-aware CE upsert with fuzzy seat_count match (±tolerance) ----
 const CE_SEAT_TOLERANCE = parseInt(process.env.CE_SEAT_TOLERANCE || "10", 10);
 
-/*async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining /!* measured_at, source *!/ }) {
+async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining /* measured_at, source */ }) {
     if (capacity == null || seats_remaining == null) {
         return { wrote: false, reason: "missing capacity/seats_remaining" };
     }
@@ -150,7 +150,7 @@ const CE_SEAT_TOLERANCE = parseInt(process.env.CE_SEAT_TOLERANCE || "10", 10);
     }
 
     return { wrote: true, screen_id, seats_sold };
-}*/
+}
 
 
 /* ---------- State ---------- */
