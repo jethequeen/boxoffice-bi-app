@@ -11,7 +11,7 @@ import { getWebdevWindowForTheater } from "../scraper/webdev_providers.js";
 const TZ               = "America/Toronto";
 const RESYNC_MIN       = 180;
 const LOOKAHEAD_H      = 4;
-const BACKPAD_MIN      = 15;
+const BACKPAD_MIN      = 1;
 const FLUSH_MIN        = 60;
 const FLUSH_BATCH      = 100;
 const SCRAPE_CONC      = 6;
@@ -30,7 +30,6 @@ const MIN_SPAN_SEC = Math.max(60, Math.ceil(TICK_MS/1000) + 15); // ensure windo
    Examples:
    - CE:  -7m ..  0m   (seven minutes before up to showtime)
    - CX: +12m .. +15m  (twelve minutes after up to fifteen after)
-   Adjust others as you like.
 --------------------------------------------------------------------------- */
 const PROVIDER_WINDOWS = {
     cineentreprise: { windowStartSec: -(7*60 + 15), windowEndSec: 0 },        // -7:15 .. 0:00
@@ -79,7 +78,7 @@ function fmtLocalDateTime(iso){
 // ---- schema-aware CE upsert with fuzzy seat_count match (±tolerance) ----
 const CE_SEAT_TOLERANCE = parseInt(process.env.CE_SEAT_TOLERANCE || "10", 10);
 
-async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining /* measured_at, source */ }) {
+/*async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, seats_remaining /!* measured_at, source *!/ }) {
     if (capacity == null || seats_remaining == null) {
         return { wrote: false, reason: "missing capacity/seats_remaining" };
     }
@@ -151,7 +150,7 @@ async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, s
     }
 
     return { wrote: true, screen_id, seats_sold };
-}
+}*/
 
 
 /* ---------- State ---------- */
@@ -260,16 +259,6 @@ async function tick() {
         const task = heap.pop();
         if (now <= task.windowEnd) {
             due.push(task.params);
-        } else {
-            console.warn("[tick] missed window", {
-                showing_id: task.params.showing_id,
-                provider: task.params.provider,
-                theater: task.params.theater_name,
-                at: `${task.params.local_date} ${task.params.local_time}`,
-                trigger: new Date(task.ts).toISOString?.() || task.ts,
-                windowEnd: new Date(task.windowEnd).toISOString?.() || task.windowEnd,
-                now: new Date(now).toISOString()
-            });
         }
     }
     if (!due.length) return;

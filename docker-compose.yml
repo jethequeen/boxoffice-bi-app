@@ -12,8 +12,8 @@ services:
       - CE_BLOCK_ASSETS=0
       - CE_TIMEOUT_MS=90000
       - RESYNC_MIN=180
-      - LOOKAHEAD_H=8
-      - BACKPAD_MIN=30
+      - LOOKAHEAD_H=4
+      - BACKPAD_MIN=1
       - FLUSH_MIN=60
       - FLUSH_BATCH=100
       - CHECK_DELAY_SEC=780
@@ -21,7 +21,3 @@ services:
       - QUIET_START=01:00
       - QUIET_END=10:00
     shm_size: "1gb"
-    volumes:
-      - msplaywright:/ms-playwright
-volumes:
-  msplaywright:
