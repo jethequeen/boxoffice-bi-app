@@ -3,7 +3,6 @@ import { chromium } from 'playwright';
 
 const SEL = {
     cookieAccept: 'button[data-cky-tag="accept-button"], .cky-btn-accept',
-
     // schedule (card + times)
     card: 'section.cinema-details__film-listing-item.movie-badge',
     cardTitle: '.movie-badge__content-main-title',
