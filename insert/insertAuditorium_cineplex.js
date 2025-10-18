@@ -371,7 +371,7 @@ export async function upsertSeatsSoldFromMeasurement({
     // For noseats providers or when we don't have an auditorium:
     // - do NOT attempt to map a screen
     // - if a screen is already set on the showing, use its capacity to compute seats_sold
-    if (!auditoriumRaw || source === 'webdev') {
+    if (!auditoriumRaw) {
         const q = await pgClient.query(
             `SELECT s.screen_id, sc.seat_count
              FROM showings s

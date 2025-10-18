@@ -102,7 +102,7 @@ register(
         type: "displayingSeats",
         HORAIRE_URL:  "https://billets.lamaisonducinema.com/FR/horaire.awp?P1=01&P2=01",
         PURCHASE_URL: "https://billets.lamaisonducinema.com/FR/Film-achat.awp",
-        window: { windowStartSec: (7 * 60), windowEndSec: 20 * 60 },
+        window: { windowStartSec: (12.15 * 60), windowEndSec: 15 * 60 },
     }
 );
 
@@ -113,7 +113,7 @@ register(
         type: "displayingSeats",
         HORAIRE_URL: "https://billetterie.cinemabeaubien.com/FR/horaire.awp?P1=01&P2=01",
         PURCHASE_URL: "https://billetterie.cinemabeaubien.com/FR/Film-achat.awp",
-        window: { windowStartSec: (7 * 60), windowEndSec: 20 * 60 },
+        window: { windowStartSec: (12.15 * 60), windowEndSec: 15 * 60 },
     }
 );
 
@@ -124,7 +124,7 @@ register(
         type: "displayingSeats",
         HORAIRE_URL: "https://billetterie.cinemaduparc.com/FR/horaire.awp?P1=01&P2=02",
         PURCHASE_URL: "https://billetterie.cinemaduparc.com/FR/Film-achat.awp",
-        window: { windowStartSec: (7 * 60), windowEndSec: 20 * 60 },
+        window: { windowStartSec: (12.15 * 60), windowEndSec: 15 * 60 },
     }
 );
 register(
@@ -133,7 +133,7 @@ register(
         type: "displayingSeats",
         HORAIRE_URL: "https://billetterie.cinemaduparc.com/FR/horaire.awp?P1=01&P2=03",
         PURCHASE_URL: "https://billetterie.cinemaduparc.com/FR/Film-achat.awp",
-        window: { windowStartSec: (7 * 60), windowEndSec: 20 * 60 },
+        window: { windowStartSec: (12.15 * 60), windowEndSec: 15 * 60 },
     }
 );
 
@@ -147,7 +147,7 @@ register(
         styleAnchors: ["margin-bottom:-1px"],
         locateExpand: "row",
         hooks: { postCleanTitle: _internal.cleaners.cleanAggressiveTitle },
-        window: { windowStartSec: (7 * 60), windowEndSec: 20 * 60 },
+        window: { windowStartSec: (12.15 * 60), windowEndSec: 15 * 60 },
     }
 );
 
