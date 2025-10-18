@@ -1,7 +1,7 @@
 ﻿import {findWebdevProviderByName, getSeatsByName} from "./webdev_providers.js";
 import {cinemathequeScrapeSeats} from "../insert/seats_sold_Cinematheque_quebecoise.js";
 import {scrapeSeatsOnly as cineplexScrapeSeats} from "../insert/insertAuditorium_cineplex.js";
-import {getSeatCountsFromSchedule as cineEntrepriseSeats} from "../scraper/cineEntreprise_horaire_scraper.js";
+// import {getSeatCountsFromSchedule as cineEntrepriseSeats} from "../scraper/cineEntreprise_horaire_scraper.js";
 
 
 
@@ -67,7 +67,7 @@ export function isCineplexName(theaterName) {
 }
 
 /* -------------------- Cine Entreprise mapping -------------------- */
-const CINE_ENTREPRISE_MAP = new Map([
+/*const CINE_ENTREPRISE_MAP = new Map([
     // name in your DB                          // cinema slug (path segment)
     ["Cinéma Élysée (Granby)",                 "cinéma-élysée".replace(/\s+/g,'')], // -> "cinéma-élysée"
     ["Cinéma Odyssée",                         "cinéma-odyssée"],
@@ -76,7 +76,8 @@ const CINE_ENTREPRISE_MAP = new Map([
     ["Cinéma Fleur de Lys",                    "cinéma-fleur-de-lys"],
     //  Pas de seats map ["Cinéma 9 Gatineau",  "cinéma-gatineau-9"],
     ["Cinéma Apéro Jonquière",                 "cinéma-jonquière"],
-]);
+]);*/
+/*
 
 const CINE_ENTREPRISE_INDEX = new Map();
 for (const [name, slug] of CINE_ENTREPRISE_MAP) {
@@ -85,6 +86,7 @@ for (const [name, slug] of CINE_ENTREPRISE_MAP) {
 function findCineEntrepriseSlugByName(theaterName) {
     return CINE_ENTREPRISE_INDEX.get(normName(theaterName)) || null;
 }
+*/
 
 
 
@@ -98,7 +100,7 @@ export function classifyTheaterName(theaterName) {
 
     if (/\bcinematheque\b|cinémath[eè]que/i.test(n)) return "cinematheque";
 
-    if (findCineEntrepriseSlugByName(theaterName)) return "cineentreprise";
+   // if (findCineEntrepriseSlugByName(theaterName)) return "cineentreprise";
 
     // very last-resort fallback (kept for safety, but explicit set should catch real cases)
     if (/\bcineplex\b/i.test(n)) return "cineplex";
@@ -144,7 +146,7 @@ export async function getSeatsByTheater(
         });
     }
 
-    if (kind === "cineentreprise") {
+/*    if (kind === "cineentreprise") {
         const slug = findCineEntrepriseSlugByName(theaterName);
         if (!slug) throw new Error(`cineentreprise: no slug for "${theaterName}"`);
         const dayLabel = dateISO
@@ -163,7 +165,7 @@ export async function getSeatsByTheater(
             context.playwright  // optional { launch, ... }
             // showUrl, theaterUrl  // <- thread if CE adds a fast-path later
         );
-    }
+    }*/
 
     throw new Error(`No provider mapping for "${theaterName}".`);
 }
