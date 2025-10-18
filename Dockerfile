@@ -38,4 +38,4 @@ RUN chown -R node:node /boxoffice-bi-app /home/node
 USER node
 
 # Launch your daemon (adjust path if it's cron/… instead)
-CMD ["node", "daemon/seatsSold_daemon.js"]
+CMD ["node", "cron/seatsSold_daemon.js"]
