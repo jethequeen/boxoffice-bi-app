@@ -33,10 +33,10 @@ const MIN_SPAN_SEC = Math.max(60, Math.ceil(TICK_MS/1000) + 15); // ensure windo
    Adjust others as you like.
 --------------------------------------------------------------------------- */
 const PROVIDER_WINDOWS = {
-    cineentreprise: { windowStartSec: -(7*60 + 15), windowEndSec: 0 },        // -7:15 .. 0:00
-    cineplex:       { windowStartSec:  (12*60 + 30), windowEndSec: (15*60+30)},// +12:30 .. +15:30
-    webdev:         { windowStartSec:  (13*60 + 45), windowEndSec: (16*60+45)},// +13:45 .. +16:45
-    cinematheque:   { windowStartSec: -(7*60),       windowEndSec: -(60)    },// -7:00 .. -1:00
+    cineentreprise: { windowStartSec: -(7*60 + 15), windowEndSec: 20*60 },        // -7:15 .. 0:00
+    cineplex:       { windowStartSec:  (12*60 + 30), windowEndSec: (20*60+30)},// +12:30 .. +15:30
+    webdev:         { windowStartSec:  (13*60 + 45), windowEndSec: (20*60+45)},// +13:45 .. +16:45
+    cinematheque:   { windowStartSec: -(7*60),       windowEndSec: 20*60   },// -7:00 .. -1:00
 };
 
 const DEFAULT_WINDOW = { windowStartSec: 12 * 60, windowEndSec: 17 * 60 };
