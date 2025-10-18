@@ -12,7 +12,7 @@ services:
       - CE_BLOCK_ASSETS=0
       - CE_TIMEOUT_MS=90000
       - RESYNC_MIN=180
-      - LOOKAHEAD_H=8
+      - LOOKAHEAD_H=4
       - BACKPAD_MIN=1
       - FLUSH_MIN=60
       - FLUSH_BATCH=100

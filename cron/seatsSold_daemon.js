@@ -259,16 +259,6 @@ async function tick() {
         const task = heap.pop();
         if (now <= task.windowEnd) {
             due.push(task.params);
-        } else {
-            console.warn("[tick] missed window", {
-                showing_id: task.params.showing_id,
-                provider: task.params.provider,
-                theater: task.params.theater_name,
-                at: `${task.params.local_date} ${task.params.local_time}`,
-                trigger: new Date(task.ts).toISOString?.() || task.ts,
-                windowEnd: new Date(task.windowEnd).toISOString?.() || task.windowEnd,
-                now: new Date(now).toISOString()
-            });
         }
     }
     if (!due.length) return;
