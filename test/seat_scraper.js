@@ -1,15 +1,20 @@
 ﻿#!/usr/bin/env node
-// Usage:
-//   node test/provider_runner.js --list
-//   node test/provider_runner.js "<Theater Name>" <YYYY-MM-DD> <HH:MM> "<Movie Title>" [--locationId=...] [--showtimesKey=...] [--movieTitle=...] [--showUrl=...]
-//   # URL-only mode (no positional args):
-//   node test/provider_runner.js --showUrl="https://billetterie.cinemasrgfm.com/FR/Film-achat.awp?P1=01&P2=02&P3=215069" --theater="Cinéma RGFM Drummondville" [--date=YYYY-MM-DD] [--time=HH:MM] [--title="..."]
-//
-// Notes:
-// - Cineplex still needs --locationId and --showtimesKey.
-// - For WebDev no-seat providers you can pass --showUrl to probe directly.
-// - On Windows PowerShell, keep quotes around names/titles with spaces or accents.
-//
+/**
+ * Minimal runner to test NEW WebDev providers using the SAME call path as the daemon.
+ *
+ * Positional usage (what you asked for):
+ *   node test/run_webdev_like_daemon.js "<Theater Name>" <YYYY-MM-DD> <HH:MM> "<Movie Title>"
+ *
+ * Optional flags:
+ *   --showUrl="https://billetterie.example.com/FR/Film-achat.awp?P1=..&P2=..&P3=.."
+ *   --expectedCapacity=152
+ *
+ * Notes:
+ * - Provider is forced to "webdev" (this is for new WebDev providers).
+ * - We call getSeatsByTheater(theater, { dateISO, hhmm, title, showUrl?, expectedCapacity? }) — identical to the daemon.
+ * - Output includes a compact summary and the raw record from the provider.
+ */
+
 import { getSeatsByTheater } from "../scraper/provider_registry.js";
 
 function parseFlags(argv) {
@@ -21,71 +26,59 @@ function parseFlags(argv) {
     return out;
 }
 
-function todayISO() {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
-}
-
 async function main() {
     const [, , ...argv] = process.argv;
+    const flags = parseFlags(argv.filter(a => a.startsWith("--")));
+    const pos   = argv.filter(a => !a.startsWith("--"));
 
-    // Quick "list" helper (stub)
-    if (argv.length === 1 && argv[0] === "--list") {
-        console.log(`(Tip) --list is not implemented in this script yet. Use your registry dumper or tests/test_webdev_cli.js if you have it.`);
-        process.exit(0);
-    }
-
-    // Parse all flags once so we can support URL-only mode
-    const allFlags = parseFlags(argv.filter(x => x.startsWith("--")));
-
-    // MODE 3: URL-only probe (no positionals required)
-    // requires: --showUrl and --theater
-    if (allFlags.showUrl && (allFlags.theater || allFlags.t)) {
-        const theaterName = allFlags.theater || allFlags.t;
-        const dateISO = allFlags.date || todayISO();
-        const hhmm = allFlags.time || "00:00";
-        const title = (allFlags.title || allFlags.movieTitle || "(unknown)").trim();
-
-        const mainArgs = { dateISO, hhmm, title, showUrl: allFlags.showUrl };
-
-        try {
-            const rec = await getSeatsByTheater(theaterName, mainArgs, allFlags);
-            console.log("MATCH:", rec);
-        } catch (e) {
-            console.error("ERR:", e?.stack || e?.message || String(e));
-            process.exit(2);
-        }
-        return;
-    }
-
-    // MODE 1: Normal positional args (back-compat)
-    if (argv.length < 4) {
+    if (pos.length < 4) {
         console.log(`Usage:
-  node test/provider_runner.js --list
-  node test/provider_runner.js "<Theater Name>" <YYYY-MM-DD> <HH:MM> "<Movie Title>" [--locationId=...] [--showtimesKey=...] [--movieTitle=...] [--showUrl=...]
-  # URL-only mode:
-  node test/provider_runner.js --showUrl="https://.../Film-achat.awp?P1=..&P2=..&P3=.." --theater="Cinéma RGFM Drummondville" [--date=YYYY-MM-DD] [--time=HH:MM] [--title="..."]
-
-Notes:
-- For Cineplex, pass --locationId and --showtimesKey.
-- For WebDev no-seat providers, --showUrl lets you probe directly without resolving from daily schedule.`);
+  node test/run_webdev_like_daemon.js "<Theater Name>" <YYYY-MM-DD> <HH:MM> "<Movie Title>"
+  # Optional:
+  node test/run_webdev_like_daemon.js "<Theater Name>" <YYYY-MM-DD> <HH:MM> "<Movie Title>" \\
+      --showUrl="https://.../Film-achat.awp?..." --expectedCapacity=152
+`);
         process.exit(1);
     }
 
-    // Positional flow:
-    const [theaterName, dateISO, hhmm, ...rest] = argv;
-    const flags = parseFlags(rest.filter(x => x.startsWith("--")));
-    const title = rest.filter(x => !x.startsWith("--")).join(" ").trim();
+    const [theater_name, dateISO, hhmm, ...rest] = pos;
+    const title = rest.join(" ").trim();
 
-    const mainArgs = { dateISO, hhmm, title };
-    if (flags.showUrl) mainArgs.showUrl = flags.showUrl;
+    // Build args EXACTLY like the daemon’s tick() for webdev:
+    const mainArgs = {
+        dateISO,
+        hhmm,
+        title,
+        ...(flags.showUrl ? { showUrl: flags.showUrl } : {}),
+        ...(flags.expectedCapacity != null ? { expectedCapacity: Number(flags.expectedCapacity) } : {}),
+    };
 
     try {
-        const rec = await getSeatsByTheater(theaterName, mainArgs, flags);
-        console.log("MATCH:", rec);
+        const rec = await getSeatsByTheater(theater_name, mainArgs /* webdev → no opts object */);
+
+        // Summarize like daemon’s measurement buffer (capacity & seats_sold if available)
+        const capacity =
+            rec?.sellable ?? rec?.raw?.sellable ?? (flags.expectedCapacity ? Number(flags.expectedCapacity) : null);
+        const seats_remaining = rec?.seats_remaining ?? null;
+
+        const out = {
+            provider: "webdev",
+            theater: theater_name,
+            date: dateISO,
+            time: hhmm,
+            title,
+            auditorium: rec?.auditorium ?? null,
+            capacity,
+            seats_remaining,
+            source: rec?.source ?? "webdev",
+        };
+
+        if (capacity != null && seats_remaining != null) {
+            const seats_sold_raw = capacity - seats_remaining;
+            out.seats_sold = Math.max(0, Math.min(capacity, seats_sold_raw));
+        }
+
+        console.log(JSON.stringify({ MATCH: out, raw: rec }, null, 2));
     } catch (e) {
         console.error("ERR:", e?.stack || e?.message || String(e));
         process.exit(2);

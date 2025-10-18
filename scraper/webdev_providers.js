@@ -190,6 +190,25 @@ register(["Cinéma Magog"], {
     hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
 });
 
+register(["Cinéma Princesse Cowansville"], {
+    type: "notDisplayingSeats",
+    HORAIRE_URL:  "https://billetterie.azurdivertissements.com/FR/horaire.awp?P1=01&P2=01",
+    PURCHASE_URL: "https://billetterie.azurdivertissements.com/FR/Film-achat.awp",
+    BASE:         "https://billetterie.azurdivertissements.com",
+    selectors: {
+        titleCandidates: (row) => [
+            `#tzzrl_${row}_A12`,
+            `#zrl_${row}_A37`,
+            `[id^="zrl_${row}_A"]`,
+        ],
+        hiddenKeySelectors: (row, a) => [
+            `#tzzrl_${row}_A${a}`,
+            `#zrl_${row}_A${a}`,
+        ],
+    },
+    hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
+});
+
 register(["Cinéma Pine Sainte-Adèle"], {
     type: "notDisplayingSeats",
     HORAIRE_URL:  "https://billetterie.cinemapine.com/FR/horaire.awp?P1=01&P2=01&P3=",

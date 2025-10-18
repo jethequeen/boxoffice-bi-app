@@ -384,8 +384,9 @@ async function main() {
         if (inQuietHours()) {
             try {
                 await runNightPrefillWebdev({
-                    allowTheaters: ["Cinéma RGFM Drummondville", "Cinéma RGFM Beloeil"],
-                    dryRun: false  // set true the first time if you want to see logs only
+                    allowTheaters: ["Cinéma RGFM Drummondville", "Cinéma RGFM Beloeil",
+                        "Cinéma Magog", "Cinéma Pine Sainte-Adèle", "Cinéma Princesse Cowansville"],
+                    dryRun: false
                 });
             } catch(e){
                 console.warn("[prefill] error:", e?.message || e);
