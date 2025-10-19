@@ -1,11 +1,12 @@
 ﻿// cron/seatsSold_daemon.js
-import { setGlobalDispatcher, Agent } from "undici";
-import { getClient } from "../db/client.js";
-import { getShowtimesKeyFromTheatreUrl, upsertSeatsSoldFromMeasurement } from "../insert/insertAuditorium_cineplex.js";
-import { getSeatsByTheater, classifyTheaterName } from "../scraper/provider_registry.js";
+import {Agent, setGlobalDispatcher} from "undici";
+import {getClient} from "../db/client.js";
+import {getShowtimesKeyFromTheatreUrl, upsertSeatsSoldFromMeasurement} from "../insert/insertAuditorium_cineplex.js";
+import {classifyTheaterName, getSeatsByTheater} from "../scraper/provider_registry.js";
 import {runNightPrefillWebdev} from "./billeterie_schedule.js";
-import { exec } from "child_process";
-import { getWebdevWindowForTheater } from "../scraper/webdev_providers.js";
+import {exec} from "child_process";
+import {getWebdevWindowForTheater} from "../scraper/webdev_providers.js";
+import fs from "fs";
 
 /* ---------- Hardcoded config (no envs) ---------- */
 const TZ               = "America/Toronto";
@@ -46,6 +47,14 @@ function normalizeWindow(w) {
         out.windowEndSec = out.windowStartSec + MIN_SPAN_SEC;
     }
     return out;
+}
+
+const TMPDIR = process.env.TMPDIR || "/tmp/seats-sold";
+
+async function ensureTmp() {
+    try {
+        await fs.promises.mkdir(TMPDIR, { recursive: true, mode: 0o1777 });
+    } catch {}
 }
 
 /* ---------- HTTP keep-alive ---------- */
@@ -360,17 +369,25 @@ async function flush(force=false) {
 }
 
 async function cleanTmp() {
-    exec(
-        `find /tmp -xdev -type f -mmin +90 \
-     ! -name '*.lock' ! -name '*.pid' -delete`,
-        err => { if (err) console.warn("[cleanup] /tmp:", err.message); }
-    );
+    const uid = typeof process.getuid === "function" ? process.getuid() : null;
+    const cmd = [
+        "find", TMPDIR, "-xdev", "-type", "f", "-mmin", "+90",
+        ...(uid !== null ? ["-user", String(uid)] : []),
+        "-writable",
+        "!", "-name", "*.lock",
+        "!", "-name", "*.pid",
+        "-delete",
+        "2>/dev/null" // supprime le bruit, au cas où
+    ].join(" ");
+    exec(cmd, err => { if (err) console.warn("[cleanup]", err.message); });
 }
+
 
 
 
 /* ---------- Scheduling ---------- */
 async function main() {
+    await ensureTmp();
     if (!inQuietHours()) await syncFromDb();
 
     setInterval(() => { if (!inQuietHours()) syncFromDb().catch(e => console.error("[sync] error", e)); }, RESYNC_MIN * 60 * 1000);
@@ -385,7 +402,7 @@ async function main() {
             try {
                 await runNightPrefillWebdev({
                     allowTheaters: ["Cinéma RGFM Drummondville", "Cinéma RGFM Beloeil",
-                        "Cinéma Magog", "Cinéma Pine Sainte-Adèle", "Cinéma Princesse Cowansville"],
+                        "Cinéma Magog", "Cinéma Princess Cowansville"],
                     dryRun: false
                 });
             } catch(e){

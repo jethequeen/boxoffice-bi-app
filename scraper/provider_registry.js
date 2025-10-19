@@ -98,7 +98,7 @@ export function classifyTheaterName(theaterName) {
 
     if (/\bcinematheque\b|cinémath[eè]que/i.test(n)) return "cinematheque";
 
-   // if (findCineEntrepriseSlugByName(theaterName)) return "cineentreprise";
+    if (findCineEntrepriseSlugByName(theaterName)) return "cineentreprise";
 
     // very last-resort fallback (kept for safety, but explicit set should catch real cases)
     if (/\bcineplex\b/i.test(n)) return "cineplex";

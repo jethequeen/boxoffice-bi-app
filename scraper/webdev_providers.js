@@ -190,7 +190,7 @@ register(["Cinéma Magog"], {
     hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
 });
 
-register(["Cinéma Princesse Cowansville"], {
+register(["Cinéma Princess Cowansville"], {
     type: "notDisplayingSeats",
     HORAIRE_URL:  "https://billetterie.azurdivertissements.com/FR/horaire.awp?P1=01&P2=01",
     PURCHASE_URL: "https://billetterie.azurdivertissements.com/FR/Film-achat.awp",
@@ -209,6 +209,9 @@ register(["Cinéma Princesse Cowansville"], {
     hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
 });
 
+// On laisse faire pour l'instant, il est divisé en phase 2 c'est gossant
+
+/*
 register(["Cinéma Pine Sainte-Adèle"], {
     type: "notDisplayingSeats",
     HORAIRE_URL:  "https://billetterie.cinemapine.com/FR/horaire.awp?P1=01&P2=01&P3=",
@@ -216,6 +219,7 @@ register(["Cinéma Pine Sainte-Adèle"], {
     BASE:         "https://billetterie.cinemapine.com",
     hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
 });
+*/
 
 
 /* ----------------------------- Public API ----------------------------- */

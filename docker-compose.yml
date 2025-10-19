@@ -20,4 +20,5 @@ services:
       - WINDOW_SEC=60
       - QUIET_START=01:00
       - QUIET_END=10:00
+      - TMPDIR=/tmp/seats-sold
     shm_size: "1gb"
