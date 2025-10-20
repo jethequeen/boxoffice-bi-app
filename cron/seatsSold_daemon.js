@@ -394,15 +394,12 @@ async function main() {
     setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, TICK_MS);
     setInterval(() => { if (!inQuietHours()) flush(false).catch(e => console.error("[flush] error", e)); }, FLUSH_MIN * 60 * 1000);
     setInterval(tryNightPrefill, 6 * 60 * 60 * 1000);  // every 6 hours, only runs during quiet hours
-    // Call this every few hours (e.g. once per flush)
     setInterval(cleanTmp,  60 * 60 * 1000);
 
     async function tryNightPrefill(){
         if (inQuietHours()) {
             try {
                 await runNightPrefillWebdev({
-                    allowTheaters: ["Cinéma RGFM Drummondville", "Cinéma RGFM Beloeil",
-                        "Cinéma Magog", "Cinéma Princess Cowansville"],
                     dryRun: false
                 });
             } catch(e){

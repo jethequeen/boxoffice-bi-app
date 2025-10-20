@@ -162,6 +162,53 @@ register(["Cinéma RGFM Drummondville"], {
     hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
 });
 
+
+// Une salle avec seat map
+register(["Cinéma RGFM Joliette"], {
+    type: "notDisplayingSeats",
+    HORAIRE_URL:  "https://billetterie.cinemasrgfm.com/FR/horaire.awp?P1=01&P2=01",
+    PURCHASE_URL: "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp",
+    BASE:         "https://billetterie.cinemasrgfm.com",
+    selectors: {
+        titleCandidates: (row) => [
+            `#tzzrl_${row}_A12`,
+            `#zrl_${row}_A37`,
+            `[id^="zrl_${row}_A"]`,
+        ],
+        hiddenKeySelectors: (row, a) => [
+            `#tzzrl_${row}_A${a}`,
+            `#zrl_${row}_A${a}`,
+        ],
+    },
+    hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
+});
+
+register(["Cinéma RGFM Saint-Laurent (Sorel-Tracy)"], {
+    type: "notDisplayingSeats",
+    HORAIRE_URL:  "https://billetterie.cinemasrgfm.com/FR/horaire.awp?P1=01&P2=04",
+    PURCHASE_URL: "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp",
+    BASE:         "https://billetterie.cinemasrgfm.com",
+    hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
+});
+
+/*// Toutes les salles en seat map
+register(["Cinéma RGFM Saint-Hyacinthe"], {
+    type: "notDisplayingSeats",
+    HORAIRE_URL:  "https://billetterie.cinemasrgfm.com/FR/horaire.awp?P1=01&P2=06",
+    PURCHASE_URL: "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp",
+    BASE:         "https://billetterie.cinemasrgfm.com",
+    hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
+});*/
+
+register(["Cinéma Capitol Drummondville"], {
+    type: "notDisplayingSeats",
+    HORAIRE_URL:  "https://billetterie.cinemasrgfm.com/FR/horaire.awp?P1=01&P2=05",
+    PURCHASE_URL: "https://billetterie.cinemasrgfm.com/FR/Film-achat.awp",
+    BASE:         "https://billetterie.cinemasrgfm.com",
+    hooks: { postCleanTitle: _internal?.cleaners?.cleanAggressiveTitle },
+});
+
+
 register(["Cinéma RGFM Beloeil"], {
     type: "notDisplayingSeats",
     HORAIRE_URL:  "https://billetterie.cinemasrgfm.com/FR/horaire.awp?P1=01&P2=02",

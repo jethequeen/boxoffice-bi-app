@@ -1,11 +1,9 @@
 ﻿// test/probe_window_to_csv.js
-// Usage:
-//   node test/probe_window_to_csv.js \
-//     --theater="Cinéma RGFM Beloeil" \
-//     --date=2025-10-15 \
-//     --start=11:00 --end=14:00 \
-//     --outfile=beloeil_1100_1400.csv \
-//     [--concurrency=3] [--probe-timeout-ms=25000]
+//
+// Focused seat-probe for a WebDev theater/time window and writes a CSV.
+// If a probe hangs past MOVIE_HARD_TIMEOUT_MS, that movie is immediately
+// suppressed for the rest of the run (force-skip), regardless of provider
+// AbortController support.
 //
 // What it does (NO DB, NO matching):
 //  1) Loads the WebDev schedule for the given theater+date.
@@ -15,26 +13,33 @@
 
 import fs from "fs";
 import path from "path";
-import process from "process";
 import { fileURLToPath } from "url";
 import pLimit from "p-limit";
 
 import { getScheduleByName } from "../scraper/webdev_providers.js";
 import { getSeatsByTheater, classifyTheaterName } from "../scraper/provider_registry.js";
 
+/* --------------------------- HARD-CODED CONFIG --------------------------- */
+const THEATER               = "Cinéma Capitol Drummondville";
+const DATE_ISO              = "2025-10-23";
+const START_HHMM            = "18:00";
+const END_HHMM              = "20:00";
+const OUTFILE_PATH          = "./capitole_probe.csv";
+const CONCURRENCY           = 2;
+
+// We still keep a per-request "soft" timeout via AbortController,
+// but the real guard is MOVIE_HARD_TIMEOUT_MS (Promise.race cutoff).
+const PROBE_TIMEOUT_MS      = 15_000;   // soft per-showing abort (if provider honors signal)
+const MOVIE_HARD_TIMEOUT_MS = 300_000;   // hard cutoff: after this, force-skip the movie
+
+const SCHEDULE_TIMEOUT_MS   = 20_000;
+const WATCHDOG_MS           = 300_000*10;
+const DEBUG                 = true;
+const DUMP_DIR              = null;     // "./_debug_dumps"
+/* ------------------------------------------------------------------------ */
+
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const TZ = "America/Toronto";
-
-function parseArgs(argv) {
-    const args = {};
-    for (let i = 2; i < argv.length; i++) {
-        const m = argv[i].match(/^--([^=]+)=(.*)$/);
-        if (m) args[m[1]] = m[2];
-    }
-    return args;
-}
+const __dirname  = path.dirname(__filename);
 
 function csv(s){
     if (s == null) return "";
@@ -44,56 +49,87 @@ function csv(s){
     }
     return t;
 }
-
-// "HH:MM" -> minutes
 function toMin(hhmm){
-    const [H,M] = hhmm.split(":").map(Number);
-    return H*60 + M;
+    const [H,M] = (hhmm || "").split(":").map(Number);
+    return (H|0)*60 + (M|0);
 }
-
-// light normalization to help grouping
 function normTitle(s=""){
     return s.normalize("NFD").replace(/\p{Diacritic}/gu,"")
         .replace(/\s+/g," ").trim();
 }
 
+// Promise.race cutoff that **detaches** the underlying promise on timeout
+async function withHardCutoff(promise, ms, label){
+    let finished = false;
+    const cutoff = new Promise((_, rej) => {
+        setTimeout(() => {
+            if (!finished) rej(Object.assign(new Error("cutoff"), { code: "CUTOFF" }));
+        }, ms);
+    });
+    try {
+        const res = await Promise.race([promise, cutoff]);
+        finished = true;
+        return res;
+    } catch (e) {
+        if (e && e.code === "CUTOFF") {
+            // Detach the original promise so it can't block; silence any late errors.
+            promise.then(() => {
+                if (DEBUG) console.log(`[detached:${label}] resolved after cutoff`);
+            }).catch(err => {
+                if (DEBUG) console.log(`[detached:${label}] rejected after cutoff: ${err?.message || err}`);
+            });
+        }
+        throw e;
+    }
+}
+
 async function main(){
-    const args = parseArgs(process.argv);
-    const theater = args.theater;
-    const dateISO = args.date; // e.g. 2025-10-15
-    const startHHMM = args.start || "11:00";
-    const endHHMM   = args.end   || "14:00";
-    const outPath   = path.resolve(args.outfile || `probe_${Date.now()}.csv`);
-    const conc      = Math.max(1, Math.min(8, parseInt(args.concurrency || "3", 10)));
-    const PROBE_TIMEOUT_MS = parseInt(args["probe-timeout-ms"] || "25000", 10);
+    const outPath = path.resolve(__dirname, OUTFILE_PATH);
 
-    if (!theater || !dateISO){
-        console.error('Missing required args. Example:\n  --theater="Cinéma RGFM Beloeil" --date=2025-10-15');
-        process.exit(1);
-    }
-
-    // We only support WebDev theaters here (that’s where these helpers work)
-    if (classifyTheaterName(theater) !== "webdev") {
-        console.error(`This script expects a WebDev theater. Got: ${theater}`);
-        process.exit(2);
-    }
-
-    // 1) Fetch schedule for the day
-    const items = await getScheduleByName(theater, { dateISO, dump:false }) || [];
-    // items: [{ title, time: "HH:MM", url, ... }]
-
-    // 2) Filter by time window (inclusive)
-    const sMin = toMin(startHHMM);
-    const eMin = toMin(endHHMM);
-    const inWindow = items.filter(it => it.url && it.time && toMin(it.time) >= sMin && toMin(it.time) <= eMin);
-
-    if (!inWindow.length) {
-        fs.writeFileSync(outPath, "info,No showings in the given time window\n");
-        console.log(`No showings in window. Wrote: ${outPath}`);
+    if (classifyTheaterName(THEATER) !== "webdev") {
+        console.error(`Expected WebDev theater. Got ${THEATER}`);
+        fs.writeFileSync(outPath, `error,expected_webdev_provider_for,${csv(THEATER)}\n`);
         return;
     }
 
-    // Deduplicate (some providers may list duplicates). Key by title+time+url
+    const lines = [];
+    lines.push("theater,date,movie,time,seats_remaining,confirm_url,schedule_url,match_notes");
+
+    const watchdog = setTimeout(() => {
+        console.error(`[watchdog] force-exit after ${WATCHDOG_MS}ms`);
+        fs.writeFileSync(outPath, lines.join("\n"), "utf8");
+        process.exit(99);
+    }, WATCHDOG_MS);
+
+    if (DEBUG) console.log(`[debug] fetching schedule for ${THEATER} @ ${DATE_ISO}`);
+    const schedCtrl = new AbortController();
+    const schedTimer = setTimeout(() => schedCtrl.abort("schedule_timeout"), SCHEDULE_TIMEOUT_MS);
+
+    let items = [];
+    try {
+        items = await getScheduleByName(THEATER, { dateISO: DATE_ISO, dump: false, signal: schedCtrl.signal }) || [];
+    } catch (e) {
+        const msg = e?.message || String(e);
+        console.error(`[schedule] ${msg}`);
+        fs.writeFileSync(outPath, `error,${csv(msg)}\n`);
+        clearTimeout(watchdog);
+        return;
+    }
+    clearTimeout(schedTimer);
+    if (DEBUG) console.log(`[debug] schedule items loaded: ${items.length}`);
+
+    const sMin = toMin(START_HHMM);
+    const eMin = toMin(END_HHMM);
+    const inWindow = items.filter(it => it?.url && it?.time && toMin(it.time) >= sMin && toMin(it.time) <= eMin);
+
+    if (DEBUG) console.log(`[debug] in-window items: ${inWindow.length} (between ${START_HHMM} and ${END_HHMM})`);
+    if (!inWindow.length) {
+        fs.writeFileSync(outPath, "info,No showings in window\n");
+        clearTimeout(watchdog);
+        return;
+    }
+
+    // Deduplicate by title+time+url
     const seen = new Set();
     const targets = [];
     for (const it of inWindow){
@@ -102,54 +138,81 @@ async function main(){
         seen.add(key);
         targets.push(it);
     }
+    if (DEBUG) console.log(`[debug] dedup targets: ${targets.length}`);
 
-    // CSV header
-    const lines = [];
-    lines.push([
-        "theater","date","movie","time",
-        "seats_remaining","confirm_url","schedule_url","match_notes"
-    ].join(","));
-
-    const limit = pLimit(conc);
+    const limit = pLimit(CONCURRENCY);
+    const suppressedByMovie = new Set();
+    let idx = 0;
 
     await Promise.all(targets.map(it => limit(async () => {
-        let capacity = "";
+        const myIdx = ++idx;
+        const titleNorm = normTitle(it.title || "");
+        if (suppressedByMovie.has(titleNorm)) {
+            if (DEBUG) console.log(`[debug][${myIdx}] SKIP (suppressed) ${titleNorm} @ ${it.time}`);
+            lines.push([csv(THEATER),csv(DATE_ISO),csv(it.title||""),csv(it.time),"","","","skipped_after_force_skip"].join(","));
+            return;
+        }
+
+        if (DEBUG) console.log(`[debug][${myIdx}/${targets.length}] probing ${titleNorm} @ ${it.time}`);
+
+        let capacity   = "";
         let confirmUrl = "";
-        let notes = "";
+        let notes      = "";
+
+        // Provider call (may ignore AbortController), wrap with hard cutoff
+        const providerCall = (async () => {
+            // Soft timeout via AbortController (best-effort)
+            const ctrl = new AbortController();
+            const softTimer = setTimeout(() => ctrl.abort("soft_timeout"), PROBE_TIMEOUT_MS);
+            try {
+                const rec = await getSeatsByTheater(
+                    THEATER,
+                    { dateISO: DATE_ISO, hhmm: it.time, title: it.title||"", showUrl: it.url, signal: ctrl.signal }
+                );
+                return rec;
+            } finally {
+                clearTimeout(softTimer);
+            }
+        })();
 
         try {
-            // 3) Probe seats for this specific showing URL
-            const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+            const rec = await withHardCutoff(providerCall, MOVIE_HARD_TIMEOUT_MS, `${titleNorm}|${it.time}`);
 
-            const rec = await getSeatsByTheater(
-                theater,
-                { dateISO, hhmm: it.time, title: it.title || "", showUrl: it.url, signal: ctrl.signal }
-            );
+            // Heuristic: detect seatmap flow if provider exposes it
+            const looksSeatmap = rec?.raw?.seatmap === true || rec?.raw?.kind === "seatmap";
+            if (looksSeatmap) {
+                suppressedByMovie.add(titleNorm);
+                notes = "provider_seatmap_detected";
+            }
 
-            clearTimeout(timer);
-
-            if (rec && typeof rec.seats_remaining === "number") {
+            if (typeof rec?.seats_remaining === "number") {
                 capacity = String(rec.seats_remaining);
-            } else {
+            } else if (!notes) {
                 notes = "no_seats_number";
             }
 
-            // confirmation URL (best-effort: raw.confirm_url || confirm_url)
             confirmUrl = rec?.raw?.confirm_url || rec?.confirm_url || "";
-
-            // include probe metadata if useful
-            if (rec?.raw?.found_q !== undefined && rec?.raw?.probed_from !== undefined) {
-                notes = `found_q=${rec.raw.found_q};from=${rec.raw.probed_from}`;
-            }
-
         } catch (e) {
-            notes = `probe_error:${(e && e.message) ? e.message : String(e)}`;
+            if (e && e.code === "CUTOFF") {
+                // Hard cutoff → suppress movie immediately
+                console.error(`[force-skip] ${titleNorm} exceeded ${MOVIE_HARD_TIMEOUT_MS}ms, skipping movie`);
+                suppressedByMovie.add(titleNorm);
+                notes = `probe_error:force_skip`;
+            } else if (e?.name === "AbortError") {
+                // Soft timeout (provider honored AbortController)
+                suppressedByMovie.add(titleNorm);
+                notes = `probe_error:timeout`;
+                if (DEBUG) console.log(`[debug][${myIdx}] soft-timeout → suppress ${titleNorm}`);
+            } else {
+                const msg = e?.message || String(e);
+                notes = `probe_error:${msg}`;
+                if (DEBUG) console.log(`[debug][${myIdx}] error: ${msg}`);
+            }
         }
 
         lines.push([
-            csv(theater),
-            csv(dateISO),
+            csv(THEATER),
+            csv(DATE_ISO),
             csv(it.title || ""),
             csv(it.time),
             csv(capacity),
@@ -160,10 +223,11 @@ async function main(){
     })));
 
     fs.writeFileSync(outPath, lines.join("\n"), "utf8");
-    console.log(`CSV written: ${outPath}`);
+    console.log(`CSV written: ${path.resolve(outPath)}`);
+    clearTimeout(watchdog);
 }
 
 main().catch(e => {
-    console.error(e?.stack || e?.message || String(e));
+    console.error(e?.stack || e);
     process.exit(1);
 });
