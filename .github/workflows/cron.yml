@@ -2,10 +2,7 @@
 
 on:
   schedule:
-    # 07:00 America/Toronto in DST (UTC-4)
-    - cron: '0 11 * * *'
-    # 07:00 America/Toronto in standard time (UTC-5)
-    - cron: '0 12 * * *'
+    - cron: '0 * * * *'   # run hourly in UTC, we gate by America/Toronto below
   workflow_dispatch:
 
 concurrency:
@@ -16,45 +13,68 @@ jobs:
   run-daily:
     runs-on: ubuntu-latest
     steps:
-      - name: Gate to 07:00 America/Toronto
+      - name: Gate by local time (America/Toronto)
         id: gate
         shell: bash
         run: |
-          HOUR=$(TZ=America/Toronto date +%H)
+          TZNAME=America/Toronto
+          HOUR=$(TZ=$TZNAME date +%H)
+
+          RUN_MORNING=false
+          RUN_REVENUE=false
+
+          # Morning-only tasks (showings) at 07:00 local
           if [ "$HOUR" = "07" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            RUN_MORNING=true
           fi
 
+          # Revenues 5x/day: 07, 11, 15, 19, 23 local
+          case "$HOUR" in
+            07|14|17|20|22) RUN_REVENUE=true ;;
+          esac
+
+          # Run if either bucket is true
+          if [ "$RUN_MORNING" = "true" ] || [ "$RUN_REVENUE" = "true" ]; then
+            SHOULD_RUN=true
+          else
+            SHOULD_RUN=false
+          fi
+
+          {
+            echo "hour=$HOUR"
+            echo "run_morning=$RUN_MORNING"
+            echo "run_revenue=$RUN_REVENUE"
+            echo "should_run=$SHOULD_RUN"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Outside window — exit
-        if: steps.gate.outputs.run != 'true'
-        run: echo "Not 07:00 in America/Toronto — exiting."
+        if: steps.gate.outputs.should_run != 'true'
+        run: echo "Not in an allowed window for America/Toronto (local hour=${{ steps.gate.outputs.hour }}) — exiting."
 
       - uses: actions/checkout@v4
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.should_run == 'true'
 
       - uses: actions/setup-node@v4
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.should_run == 'true'
         with:
           node-version: '20'
           cache: 'npm'
 
       - run: npm ci
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.should_run == 'true'
 
       - name: Create .env
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.should_run == 'true'
         run: |
           echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> .env
           echo "TMDB_API_KEY=${{ secrets.TMDB_API_KEY }}" >> .env
 
-      # Run showings every morning
+      # Run showings ONLY at 07:00 America/Toronto
       - name: Run cron_showings.js
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run_morning == 'true'
         run: node cron/cron_showings.js
 
-      # Run revenues every morning
+      # Run revenues 5x/day (07, 11, 15, 19, 23)
       - name: Run cron.js
-        if: steps.gate.outputs.run == 'true'
+        if: steps.gate.outputs.run_revenue == 'true'
         run: node cron/cron.js
