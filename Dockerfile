@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 WORKDIR /boxoffice-bi-app
 
-# OS bits (non-interactive tz/locales)
+# Dépendances OS + locales + fonts
 RUN apt-get update -y \
  && apt-get install -y --no-install-recommends \
       tzdata locales fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
@@ -24,23 +24,33 @@ RUN apt-get update -y \
  && locale-gen \
  && rm -rf /var/lib/apt/lists/*
 
-# Install node deps first for cache
+# Node deps d'abord
 COPY package*.json ./
 RUN npm ci --omit=dev
 
-# IMPORTANT: run as pwuser and use bash so $(...) works
+# On installe le Chrome correspondant à ta version de puppeteer-core
 USER pwuser
 SHELL ["/bin/bash", "-lc"]
-
-# Install the Chrome version matching your puppeteer-core MAJOR
-# (e.g., puppeteer-core 22.x => use puppeteer@22 CLI)
 RUN npx -y puppeteer@$(node -p "require('./node_modules/puppeteer-core/package.json').version.split('.')[0]") \
-    browsers install chrome
+      browsers install chrome \
+ && echo "PUPPETEER_EXECUTABLE_PATH=$(node -e \"\
+  const fs=require('fs');\
+  const p=process.env.PUPPETEER_CACHE_DIR||process.env.HOME+'/.cache/puppeteer';\
+  const v=require('./node_modules/puppeteer-core/package.json').version.split('.')[0];\
+  const d=fs.readdirSync(p).find(n=>n.startsWith('chrome'));\
+  console.log(p+'/'+d+'/chrome-linux64/chrome');\
+ \")" | tee -a /home/pwuser/.bashrc /etc/environment
 
-# App code
+# Répertoire runtime pour Chrome (évite crashs XDG + sandbox)
+RUN mkdir -p /tmp/runtime-pwuser && chmod 700 /tmp/runtime-pwuser
+
+# Appli
 USER root
 COPY . .
-RUN chown -R pwuser:pwuser /boxoffice-bi-app
+RUN chown -r pwuser:pwuser /boxoffice-bi-app
 USER pwuser
+ENV XDG_RUNTIME_DIR=/tmp/runtime-pwuser
 
+# Bonnes pratiques headless: no-sandbox + shm
+# (tu as déjà shm_size: "1gb" dans compose)
 CMD ["node", "cron/seatsSold_daemon.js"]

@@ -92,7 +92,15 @@ function extractDigits(s) {
 
 /** Get the Ocp-Apim-Subscription-Key by visiting a theatre page once. */
 export async function getShowtimesKeyFromTheatreUrl(theatreUrl) {
-    const browser = await puppeteer.launch({ headless: "new" });
+    const browser = await puppeteer.launch({   headless: 'new',
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+        ],
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, // voir Dockerfile ci-dessous
+    });
     try {
         const page = await browser.newPage();
         let key = null;
