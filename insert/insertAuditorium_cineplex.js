@@ -1,27 +1,39 @@
 ﻿// insert/insertAuditorium_cineplex.js
 
-import fs from "fs";
-import glob from "glob";
-import puppeteer from "puppeteer";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import puppeteer from "puppeteer-core"; // évite tout download; on pointe vers Chromium de Playwright
 
 const SHOWTIMES_PREFIX = "https://apis.cineplex.com/prod/cpx/theatrical/api/v1/showtimes";
 
-// --- headless browser resolver (no download; use Chromium from Playwright image) ---
+/* ---------- Headless browser resolver (zéro download) ---------- */
 function resolveChromePath() {
-    // 1) Honor env var if provided
-    if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
-        return process.env.PUPPETEER_EXECUTABLE_PATH;
+    // 1) Respecte la variable si fournie
+    const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    if (envPath && fs.existsSync(envPath)) return envPath;
+
+    // 2) Chromium livré par l'image Playwright (déjà présent)
+    const base = "/ms-playwright";
+    try {
+        const entries = fs.readdirSync(base, { withFileTypes: true });
+        for (const e of entries) {
+            if (e.isDirectory() && e.name.startsWith("chromium-")) {
+                const p = path.join(base, e.name, "chrome-linux", "chrome");
+                if (fs.existsSync(p)) return p;
+            }
+        }
+    } catch {
+        // ignore
     }
-    // 2) Playwright Chromium bundled in the base image
-    const matches = glob.sync("/ms-playwright/**/chrome-linux/chrome");
-    if (matches.length) return matches[0];
-    // 3) Common fallbacks
+
+    // 3) Fallbacks connus
     const fallbacks = ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
     for (const p of fallbacks) if (fs.existsSync(p)) return p;
+
     throw new Error("No Chrome/Chromium executable found");
 }
 
-// --- utils ---
+/* ------------------------------ utils ------------------------------ */
 const norm = (s) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const squish = (s) => norm(s).replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 
@@ -36,7 +48,7 @@ const hhmmFrom = (s) => {
     return t.slice(0, 5); // HH:MM
 };
 
-// Flatten Cineplex payload to session candidates
+/* ---- Flatten Cineplex payload to session candidates ---- */
 function flattenShowtimesPayload(json) {
     const out = [];
     const movies = json?.dates?.[0]?.movies ?? [];
@@ -63,7 +75,7 @@ function flattenShowtimesPayload(json) {
     return out;
 }
 
-// --- dedupe helpers ---
+/* ---------------------- dedupe helpers ---------------------- */
 function sessionKey(r) {
     return r.vistaSessionId
         ? `v:${r.vistaSessionId}`
@@ -93,7 +105,7 @@ function dedupeSessions(cands) {
     return Array.from(byKey.values());
 }
 
-// --- auditorium matching helpers (DB) ---
+/* --------------- auditorium matching helpers (DB) --------------- */
 function normalizeAudName(s) {
     return (s || "")
         .toLowerCase()
