@@ -1,5 +1,4 @@
-﻿version: "3.9"
-services:
+﻿services:
   seats-sold:
     build: .
     container_name: seats-sold

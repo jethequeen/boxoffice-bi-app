@@ -1,7 +1,25 @@
 ﻿// insert/insertAuditorium_cineplex.js
+
+import fs from "fs";
+import glob from "glob";
 import puppeteer from "puppeteer";
 
 const SHOWTIMES_PREFIX = "https://apis.cineplex.com/prod/cpx/theatrical/api/v1/showtimes";
+
+// --- headless browser resolver (no download; use Chromium from Playwright image) ---
+function resolveChromePath() {
+    // 1) Honor env var if provided
+    if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+        return process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+    // 2) Playwright Chromium bundled in the base image
+    const matches = glob.sync("/ms-playwright/**/chrome-linux/chrome");
+    if (matches.length) return matches[0];
+    // 3) Common fallbacks
+    const fallbacks = ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
+    for (const p of fallbacks) if (fs.existsSync(p)) return p;
+    throw new Error("No Chrome/Chromium executable found");
+}
 
 // --- utils ---
 const norm = (s) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -92,14 +110,15 @@ function extractDigits(s) {
 
 /** Get the Ocp-Apim-Subscription-Key by visiting a theatre page once. */
 export async function getShowtimesKeyFromTheatreUrl(theatreUrl) {
-    const browser = await puppeteer.launch({   headless: 'new',
+    const browser = await puppeteer.launch({
+        headless: "new",
+        executablePath: resolveChromePath(),
         args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
         ],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, // voir Dockerfile ci-dessous
     });
     try {
         const page = await browser.newPage();
@@ -139,7 +158,7 @@ export async function fetchSeatsForShowtime({
         String(locationId)
     )}&date=${encodeURIComponent(toMDY(date))}`;
 
-    const res = await fetch(url, { headers: { Accept: "application/json", "Ocp-Apim-Subscription-Key": showtimesKey }});
+    const res = await fetch(url, { headers: { Accept: "application/json", "Ocp-Apim-Subscription-Key": showtimesKey } });
     if (!res.ok) throw new Error(`Showtimes fetch failed: ${res.status}`);
 
     const payload = await res.json();
@@ -224,7 +243,7 @@ export async function scrapeSeatsOnly({
 
 /**
  * NEW: Upsert using an ALREADY SCRAPED measurement (no re-scrape).
- * - measurement must include: showing_id, theater_id, movie_id, auditorium, seats_remaining
+ * - measurement must include: showing_id, theater_id, movie_id, auditorium, seats_remaining, source
  * - will update showings by id (assumes row exists from scheduling query)
  */
 export async function upsertSeatsSoldFromMeasurement({
@@ -262,10 +281,10 @@ export async function upsertSeatsSoldFromMeasurement({
 
             await pgClient.query(
                 `UPDATE showings
-            SET seats_sold = $1,
-                scraped_at = now()
-          WHERE id = $2
-            AND seats_sold IS DISTINCT FROM $1`,
+                 SET seats_sold = $1,
+                     scraped_at = now()
+                 WHERE id = $2
+                   AND seats_sold IS DISTINCT FROM $1`,
                 [seats_sold, showing_id]
             );
 
@@ -309,9 +328,9 @@ export async function upsertSeatsSoldFromMeasurement({
     if (res.rowCount === 0) {
         res = await pgClient.query(
             `SELECT id, name, seat_count FROM screens
-        WHERE theater_id = $1 AND name ILIKE $2
-        ORDER BY LENGTH(name) ASC
-        LIMIT 1`,
+             WHERE theater_id = $1 AND name ILIKE $2
+             ORDER BY LENGTH(name) ASC
+                 LIMIT 1`,
             [theater_id, `%${auditoriumRaw}%`]
         );
     }
@@ -330,10 +349,10 @@ export async function upsertSeatsSoldFromMeasurement({
     // Update seats_sold (idempotent)
     await pgClient.query(
         `UPDATE showings
-        SET seats_sold = $1,
-            scraped_at = now()
-      WHERE id = $2
-        AND seats_sold IS DISTINCT FROM $1`,
+         SET seats_sold = $1,
+             scraped_at = now()
+         WHERE id = $2
+           AND seats_sold IS DISTINCT FROM $1`,
         [seats_sold, showing_id]
     );
 
