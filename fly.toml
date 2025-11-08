@@ -1,6 +1,5 @@
-﻿# fly.toml — for a non-HTTP, always-on worker (Machines platform)
-app = "cinestats-seats-daemon"    # <— change to your app name from `fly apps create`
-primary_region = "iad"            # or "yyz"/closest region you prefer
+﻿app = "cinestats-seats-daemon"    # <— change to your app name from `fly apps create`
+primary_region = "yyz"            # or "yyz"/closest region you prefer
 
 # Build from your Dockerfile (Playwright base)
 [build]
