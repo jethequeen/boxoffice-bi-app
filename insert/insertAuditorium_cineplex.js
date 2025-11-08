@@ -1,37 +1,8 @@
 ﻿// insert/insertAuditorium_cineplex.js
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { chromium } from "playwright";
 
 const SHOWTIMES_PREFIX = "https://apis.cineplex.com/prod/cpx/theatrical/api/v1/showtimes";
-
-/* ---------- Headless browser resolver (zéro download) ---------- */
-function resolveChromePath() {
-    // 1) Respecte la variable si fournie
-    const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    if (envPath && fs.existsSync(envPath)) return envPath;
-
-    // 2) Chromium livré par l'image Playwright (déjà présent)
-    const base = "/ms-playwright";
-    try {
-        const entries = fs.readdirSync(base, { withFileTypes: true });
-        for (const e of entries) {
-            if (e.isDirectory() && e.name.startsWith("chromium-")) {
-                const p = path.join(base, e.name, "chrome-linux", "chrome");
-                if (fs.existsSync(p)) return p;
-            }
-        }
-    } catch {
-        // ignore
-    }
-
-    // 3) Fallbacks connus
-    const fallbacks = ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
-    for (const p of fallbacks) if (fs.existsSync(p)) return p;
-
-    throw new Error("No Chrome/Chromium executable found");
-}
 
 /* ------------------------------ utils ------------------------------ */
 const norm = (s) => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -121,7 +92,7 @@ function extractDigits(s) {
 }
 
 
-/** Get the Ocp-Apim-Subscription-Key by visiting a theatre page once. */
+/** Get the Ocp-Apim-Subscription-Key by visiting a theatre page once (Playwright). */
 export async function getShowtimesKeyFromTheatreUrl(theatreUrl) {
     const browser = await chromium.launch({
         headless: true,
@@ -135,23 +106,30 @@ export async function getShowtimesKeyFromTheatreUrl(theatreUrl) {
         ],
     });
 
+    let context;
     try {
-        const page = await browser.newPage();
+        context = await browser.newContext({
+            userAgent:
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            locale: "en-CA",
+            extraHTTPHeaders: { "Accept-Language": "en-CA,en;q=0.9" },
+        });
 
-        await page.setUserAgent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        );
-        await page.setExtraHTTPHeaders({ "Accept-Language": "en-CA,en;q=0.9" });
+        const page = await context.newPage();
 
-        const SHOWTIMES_PREFIX = "<your prefix here>";
+        // Wait specifically for the Cineplex API call that includes the header
         const reqPromise = page.waitForRequest(
-            r => r.url().startsWith(SHOWTIMES_PREFIX) &&
+            (r) =>
+                r.url().startsWith(SHOWTIMES_PREFIX) &&
                 !!r.headers()["ocp-apim-subscription-key"],
             { timeout: 90_000 }
         );
 
+        // Don’t use networkidle; many modern sites never go idle
         await page.goto(theatreUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
+
+        // Nudge lazy loaders
         await page.evaluate(() => window.scrollTo(0, 200));
 
         const req = await reqPromise;
@@ -159,6 +137,7 @@ export async function getShowtimesKeyFromTheatreUrl(theatreUrl) {
         if (!key) throw new Error("Could not capture Ocp-Apim-Subscription-Key");
         return key;
     } finally {
+        await context?.close().catch(() => {});
         await browser.close().catch(() => {});
     }
 }
