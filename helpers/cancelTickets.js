@@ -79,7 +79,6 @@ export async function cancelAzurConfirm(confirmUrl, cookie) {
     const set1 = getRes.headers.raw()["set-cookie"] || [];
     cookie = mergeCookieString(cookie, set1);
     const html = await getRes.text();
-    try { fs.writeFileSync("confirm_page.html", html, "utf8"); } catch {}
     const inputs = collectAllInputs(html);
 
     // Heads-up if we likely lack a server session cookie
