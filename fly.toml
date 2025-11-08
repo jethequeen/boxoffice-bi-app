@@ -9,6 +9,12 @@ primary_region = "yyz"
 [env]
 TZ = "America/Toronto"
 NODE_ENV = "production"
+PUPPETEER_EXECUTABLE_PATH="/usr/bin/google-chrome"
+
+
+
+[deploy]
+strategy = "immediate"
 
 [processes]
 app = "node cron/seatsSold_daemon.js"

@@ -28,6 +28,6 @@ jobs:
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Deploy prebuilt image
-        run: flyctl deploy -a cinestats -i "registry.fly.io/cinestats:${{ github.sha }}" --config fly.toml
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy -a cinestats -i "registry.fly.io/cinestats:${{ github.sha }}" --config fly.toml --strategy immediate
+        env: { FLY_API_TOKEN: ${ { secrets.FLY_API_TOKEN } } }
+

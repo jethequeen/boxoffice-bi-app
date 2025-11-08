@@ -120,33 +120,61 @@ function extractDigits(s) {
     return m ? m.join("") : "";
 }
 
+function chromePath() {
+    return (
+        process.env.PUPPETEER_EXECUTABLE_PATH ||
+        "/usr/bin/google-chrome" // present in mcr.microsoft.com/playwright:* images
+    );
+}
+
 /** Get the Ocp-Apim-Subscription-Key by visiting a theatre page once. */
 export async function getShowtimesKeyFromTheatreUrl(theatreUrl) {
     const browser = await puppeteer.launch({
         headless: "new",
-        executablePath: resolveChromePath(),
+        executablePath: chromePath(),
         args: [
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--no-zygote",
             "--disable-gpu",
         ],
     });
+
     try {
         const page = await browser.newPage();
-        let key = null;
-        page.on("request", (req) => {
-            if (req.url().startsWith(SHOWTIMES_PREFIX)) {
-                const k = req.headers()["ocp-apim-subscription-key"];
-                if (k) key = k;
-            }
+
+        // More “human” defaults (helps with some interstitials)
+        await page.setUserAgent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        );
+        await page.setExtraHTTPHeaders({
+            "Accept-Language": "en-CA,en;q=0.9",
         });
-        await page.goto(theatreUrl, { waitUntil: "networkidle2", timeout: 45000 });
-        if (!key) await new Promise((r) => setTimeout(r, 800));
+
+        // Wait specifically for *the* API request instead of networkidle
+        const waitForKey = page.waitForRequest(
+            req => req.url().startsWith(SHOWTIMES_PREFIX) &&
+                !!req.headers()["ocp-apim-subscription-key"],
+            { timeout: 90_000 } // generous to absorb cold DNS/TLS starts
+        );
+
+        // Navigate with a lighter condition (domcontentloaded) so long-polls don't hang us
+        await page.goto(theatreUrl, { waitUntil: "domcontentloaded", timeout: 120_000 });
+
+        // Nudge the page so lazy logic runs (some sites trigger XHR after a tick/scroll)
+        await page.evaluate(() => { window.scrollTo(0, 200); });
+
+        // Race: either we see the request with the header, or time out
+        const req = await waitForKey;
+        const key = req.headers()["ocp-apim-subscription-key"];
         if (!key) throw new Error("Could not capture Ocp-Apim-Subscription-Key");
         return key;
+
     } finally {
-        await browser.close();
+        await browser.close().catch(() => {});
     }
 }
 
