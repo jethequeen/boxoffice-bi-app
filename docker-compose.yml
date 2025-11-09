@@ -1,8 +1,26 @@
 ﻿services:
   seats-sold:
     build: .
+    image: seats-sold:latest
     container_name: seats-sold
     restart: unless-stopped
+
+    # Cap /tmp so temp junk (screens, HTML, Playwright profiles) can’t explode
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+
+    # Keep Chromium happy
+    shm_size: "1gb"
+
+    # Rotate container stdout/stderr logs (json-file driver)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+
+    # Your envs
     env_file:
       - .env.txt
     environment:
@@ -20,4 +38,11 @@
       - QUIET_START=01:00
       - QUIET_END=10:00
       - TMPDIR=/tmp/seats-sold
-    shm_size: "1gb"
+      # Turn OFF crash dumps unless you really need them
+      - PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0
+      - PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
+      - PLAYWRIGHT_DISABLE_MULTIPATH=1
+      # Optional: toggle your own debug snapshots OFF by default
+      - CE_DEBUG_SNAP=0
+      # Optional: reduce Node’s default log noise if you add levels
+      - LOG_LEVEL=info

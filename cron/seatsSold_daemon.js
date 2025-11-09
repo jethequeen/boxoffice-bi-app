@@ -305,7 +305,6 @@ async function tick() {
                 }
             } catch (e) {
                 failures.push({ params: p, err: e?.message || String(e) });
-                console.warn("[sample] failed:", e?.message || e, "payload:", p);
             }
         }))
     );
@@ -394,7 +393,7 @@ async function main() {
     setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, TICK_MS);
     setInterval(() => { if (!inQuietHours()) flush(false).catch(e => console.error("[flush] error", e)); }, FLUSH_MIN * 60 * 1000);
     setInterval(tryNightPrefill, 6 * 60 * 60 * 1000);  // every 6 hours, only runs during quiet hours
-    setInterval(cleanTmp,  60 * 60 * 1000);
+    setInterval(cleanTmp, 30 * 60 * 1000);  // every 30 min
 
     async function tryNightPrefill(){
         if (inQuietHours()) {

@@ -500,10 +500,8 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
             LIMIT 10`,
                     [weekendId]
                 );
-                console.log(`[estimates] sample rows w/ potential NULLs:`, sample.rows);
             }
         } catch (pErr) {
-            console.warn(`[estimates] postflight diagnostics failed:`, pErr.message);
         }
 
         // Refresh popularity for rows actually inserted/updated
