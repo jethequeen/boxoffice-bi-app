@@ -139,6 +139,8 @@ async function upsertBySeatCount({ pgClient, theater_id, showing_id, capacity, s
         [seats_sold, showing_id]
     );
 
+
+
 // set screen only if it's not already set (tolerant, write-once)
     await pgClient.query(
         `UPDATE showings
@@ -381,7 +383,7 @@ async function cleanTmp() {
     exec(cmd, err => { if (err) console.warn("[cleanup]", err.message); });
 }
 
-
+let shuttingDown = false;
 
 
 /* ---------- Scheduling ---------- */
@@ -407,13 +409,34 @@ async function main() {
         }
     }
 
+    const quit = async (signal) => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        console.log(`[shutdown] received ${signal}; stopping timers and draining…`);
 
+        // stop new work
+        for (const t of timers) try { clearInterval(t); } catch {}
 
+        // small grace to let any "due.map(...)" settle
+        await new Promise(r => setTimeout(r, 500));
 
-    const shutdown = async () => { try { await flush(true); } finally { process.exit(0); } };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+        // final flush with a hard timeout (e.g., 20s)
+        await Promise.race([
+            (async () => { try { await flush(true); } catch (e) { console.error("[shutdown] flush failed:", e?.message || e); } })(),
+            new Promise((_, rej) => setTimeout(() => rej(new Error("flush timeout")), 20_000)),
+        ]).catch(e => console.error("[shutdown]", e.message));
 
-    console.log(`[start] seats heap daemon: resync=${RESYNC_MIN}m, lookahead=${LOOKAHEAD_H}h, tick=${Math.round(TICK_MS/1000)} seconds, flush=${FLUSH_MIN}m, batch=${FLUSH_BATCH}`);
+        console.log("[shutdown] done; exiting 0");
+        process.exit(0);
+    };
+
+    // catch everything that could terminate the process
+    process.on("SIGTERM", () => quit("SIGTERM"));
+    process.on("SIGINT",  () => quit("SIGINT"));
+    process.on("beforeExit", () => quit("beforeExit"));
+    process.on("uncaughtException", (e) => { console.error("[uncaughtException]", e); quit("uncaughtException"); });
+    process.on("unhandledRejection", (e) => { console.error("[unhandledRejection]", e); quit("unhandledRejection"); });
+
+    console.log(`[start] seats heap daemon: resync=${RESYNC_MIN}m, lookahead=${LOOKAHEAD_H}h, tick=${Math.round(TICK_MS/1000)}s, flush=${FLUSH_MIN}m, batch=${FLUSH_BATCH}`);
 }
 main();
