@@ -76,7 +76,7 @@ export async function ensureMovieIdOrPlaceholder(
                 try {
                     const m = await searchMovie(q, y, { strict: true, tol: 1, allowNoYearFallback: false });
                     if (m?.id) {
-                        await insertMetadata(m.id, frTitleRaw);
+                        await insertMetadata(m.id, frTitleRaw, baseFilmUrl);
                         await db.query("COMMIT");
                         return Number(m.id);
                     }

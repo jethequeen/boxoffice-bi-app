@@ -2,13 +2,17 @@
 import fetch from 'node-fetch';
 import { getClient } from '../db/client.js';
 import dotenv from 'dotenv';
+import { fetchReleaseDateFromCinoche } from '../helpers/cinocheReleaseDate.js';
 dotenv.config();
 
 /**
  * Insert full metadata if new; if the movie already exists, refresh ONLY popularity.
+ * @param {number} tmdbId - The TMDB ID of the movie
+ * @param {string|null} fr_title - The French title of the movie
+ * @param {string|null} baseFilmUrl - Optional Cinoche URL to fetch release date from
  */
-export async function insertMetadata(tmdbId, fr_title = null) {
-    console.log(`→ insertMetadata: tmdbId=${tmdbId}, fr_title="${fr_title}"`);
+export async function insertMetadata(tmdbId, fr_title = null, baseFilmUrl = null) {
+    console.log(`→ insertMetadata: tmdbId=${tmdbId}, fr_title="${fr_title}", baseFilmUrl="${baseFilmUrl}"`);
     const client = getClient();
     await client.connect();
 
@@ -29,22 +33,43 @@ export async function insertMetadata(tmdbId, fr_title = null) {
             const details = await detailsResp.json();
             const newPopularity = details.popularity ?? 0;
 
-            // Refresh popularity to the latest value (no GREATEST—use the live value)
-            await client.query(
-                `UPDATE movies SET popularity = $2 WHERE id = $1`,
-                [tmdbId, newPopularity]
-            );
+            // Try to get Cinoche release date if baseFilmUrl is provided
+            let cinocheReleaseDate = null;
+            if (baseFilmUrl) {
+                try {
+                    cinocheReleaseDate = await fetchReleaseDateFromCinoche(baseFilmUrl);
+                    if (cinocheReleaseDate) {
+                        console.log(`Found Cinoche release date for existing movie: ${cinocheReleaseDate}`);
+                    }
+                } catch (err) {
+                    console.warn(`Failed to fetch Cinoche release date: ${err.message}`);
+                }
+            }
 
-            // (Optional tiny fill: if you still want to set fr_title when it's missing only)
-            // if (fr_title) {
-            //   await client.query(
-            //     `UPDATE movies SET fr_title = COALESCE(fr_title, $2) WHERE id = $1`,
-            //     [tmdbId, fr_title]
-            //   );
-            // }
+            // Update popularity and optionally release_date
+            if (cinocheReleaseDate) {
+                await client.query(
+                    `UPDATE movies SET popularity = $2, release_date = $3 WHERE id = $1`,
+                    [tmdbId, newPopularity, cinocheReleaseDate]
+                );
+                console.log(`↷ Updated movie ${tmdbId}: popularity → ${newPopularity}, release_date → ${cinocheReleaseDate}`);
+            } else {
+                await client.query(
+                    `UPDATE movies SET popularity = $2 WHERE id = $1`,
+                    [tmdbId, newPopularity]
+                );
+                console.log(`↷ Popularity refreshed for movie ${tmdbId} → ${newPopularity}`);
+            }
+
+            // Fill in fr_title if missing
+            if (fr_title) {
+                await client.query(
+                    `UPDATE movies SET fr_title = COALESCE(fr_title, $2) WHERE id = $1`,
+                    [tmdbId, fr_title]
+                );
+            }
 
             await client.query('COMMIT');
-            console.log(`↷ Popularity refreshed for movie ${tmdbId} → ${newPopularity}`);
             return;
         }
 
@@ -68,7 +93,27 @@ export async function insertMetadata(tmdbId, fr_title = null) {
             return posters[0]?.file_path || details.poster_path || null;
         }
 
-        const releaseDate = details.release_date || null;
+        // Prefer Cinoche release date over TMDB if available
+        let releaseDate = null;
+        if (baseFilmUrl) {
+            try {
+                const cinocheReleaseDate = await fetchReleaseDateFromCinoche(baseFilmUrl);
+                if (cinocheReleaseDate) {
+                    releaseDate = cinocheReleaseDate;
+                    console.log(`Using Cinoche release date: ${releaseDate}`);
+                }
+            } catch (err) {
+                console.warn(`Failed to fetch Cinoche release date: ${err.message}`);
+            }
+        }
+        // Fallback to TMDB release date if Cinoche date not found
+        if (!releaseDate) {
+            releaseDate = details.release_date || null;
+            if (releaseDate) {
+                console.log(`Using TMDB release date: ${releaseDate}`);
+            }
+        }
+
         const popularity = details.popularity ?? 0;
         const poster     = choosePoster(details, images);
         const backdrop   = details.backdrop_path ?? null;

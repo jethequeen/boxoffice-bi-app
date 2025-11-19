@@ -32,7 +32,7 @@ for (const [title, qcData] of qcMap.entries()) {
     const releaseYear = match.release_date?.split('-')[0];
     const usData = usMap.get(title);
 
-    await insertMetadata(tmdbId, qcData.fr_title);
+    await insertMetadata(tmdbId, qcData.fr_title, qcData.url);
 
     await insertRevenue(tmdbId, releaseYear, fridayDate, {
         weekEnd: qcData.weekEnd,

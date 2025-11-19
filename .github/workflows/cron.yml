@@ -3,6 +3,7 @@
 on:
   schedule:
     - cron: '0 * * * *'   # run hourly in UTC, we gate by America/Toronto below
+    - cron: '0 7 * * 0'   # run weekly on Sunday at 07:00 UTC for popularity refresh
   workflow_dispatch:
 
 concurrency:
@@ -19,9 +20,12 @@ jobs:
         run: |
           TZNAME=America/Toronto
           HOUR=$(TZ=$TZNAME date +%H)
+          DAY_OF_WEEK=$(TZ=$TZNAME date +%u)  # 1 = Monday, 7 = Sunday
 
           RUN_MORNING=false
           RUN_REVENUE=false
+          RUN_POPULARITY=false
+          RUN_LOOKAHEAD=false
 
           # Morning-only tasks (showings) at 07:00 local
           if [ "$HOUR" = "07" ]; then
@@ -33,8 +37,18 @@ jobs:
             07|14|17|20|22) RUN_REVENUE=true ;;
           esac
 
-          # Run if either bucket is true
-          if [ "$RUN_MORNING" = "true" ] || [ "$RUN_REVENUE" = "true" ]; then
+          # Weekly popularity refresh on Sunday at 07:00 local
+          if [ "$DAY_OF_WEEK" = "7" ] && [ "$HOUR" = "07" ]; then
+            RUN_POPULARITY=true
+          fi
+
+          # Weekly look-ahead on Friday at 07:00 local
+          if [ "$DAY_OF_WEEK" = "5" ] && [ "$HOUR" = "07" ]; then
+            RUN_LOOKAHEAD=true
+          fi
+
+          # Run if any bucket is true
+          if [ "$RUN_MORNING" = "true" ] || [ "$RUN_REVENUE" = "true" ] || [ "$RUN_POPULARITY" = "true" ] || [ "$RUN_LOOKAHEAD" = "true" ]; then
             SHOULD_RUN=true
           else
             SHOULD_RUN=false
@@ -42,8 +56,11 @@ jobs:
 
           {
             echo "hour=$HOUR"
+            echo "day_of_week=$DAY_OF_WEEK"
             echo "run_morning=$RUN_MORNING"
             echo "run_revenue=$RUN_REVENUE"
+            echo "run_popularity=$RUN_POPULARITY"
+            echo "run_lookahead=$RUN_LOOKAHEAD"
             echo "should_run=$SHOULD_RUN"
           } >> "$GITHUB_OUTPUT"
 
@@ -78,3 +95,13 @@ jobs:
       - name: Run cron.js
         if: steps.gate.outputs.run_revenue == 'true'
         run: node cron/cron.js
+
+      # Run weekly popularity refresh on Sunday at 07:00 America/Toronto
+      - name: Run cron_popularity.js
+        if: steps.gate.outputs.run_popularity == 'true'
+        run: node cron/cron_popularity.js
+
+      # Run weekly look-ahead on Friday at 07:00 America/Toronto
+      - name: Run cron_lookahead.js
+        if: steps.gate.outputs.run_lookahead == 'true'
+        run: node cron/cron_lookahead.js

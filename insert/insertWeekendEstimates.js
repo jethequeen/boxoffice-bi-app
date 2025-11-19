@@ -489,7 +489,6 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
             AND (showings_proportion IS NULL OR average_showing_occupancy IS NULL)`,
                 [weekendId]
             );
-            console.log(`[estimates] Remaining 'estimate' rows with NULL feature(s): ${post.rows[0]?.n_null ?? 0}`);
 
             if ((post.rows[0]?.n_null ?? 0) > 0) {
                 const sample = await client.query(

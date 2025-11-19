@@ -9,6 +9,7 @@ import { insertShowingsForMovie } from "../insert/insertShowings.js";
 import { searchMovie } from "../insert/searchMovie.js";
 import { getClient } from "../db/client.js";
 import {ensureMovieIdOrPlaceholder} from "../helpers/movieIDorPlaceHolder.js";
+import { getCurrentAndNextMonthMovies } from "../scraper/comingSoon.js";
 
 // ---------- .env loading ----------
 const __filename = fileURLToPath(import.meta.url);
@@ -56,15 +57,23 @@ function yearFromBlocks(blocks){
 // ---------- job body (top-level) ----------
 try {
     const films = await getProgram({ minShows: MIN_SHOWS, maxFilms: MAX_FILMS, sleepMs: SLEEP_MS });
-    if (!films.length) {
-        console.log("No candidates with sufficient showings found.");
+
+    // Also fetch movies from current + next month coming soon pages
+    console.log("\n=== Fetching movies from current + next month coming soon pages ===");
+    const comingSoonMovies = await getCurrentAndNextMonthMovies();
+    console.log(`Found ${comingSoonMovies.length} movies from coming soon pages\n`);
+
+    if (!films.length && !comingSoonMovies.length) {
+        console.log("No candidates found from showings or coming soon pages.");
         process.exit(0);
     }
+
     const db = getClient();
     await db.connect();
     try {
-
         let processed = 0;
+
+        // Process films with showings first
         for (const c of films) {
             try {
                 const baseFilmUrl = toBaseFilmUrl(c.href);
@@ -99,6 +108,48 @@ try {
                 console.warn(`⚠️ Film error (${c?.title || "?"}):`, filmErr?.message || filmErr);
             }
         }
+
+        // Process coming soon movies (may not have showings yet)
+        console.log("\n=== Processing coming soon movies ===");
+        for (const movie of comingSoonMovies) {
+            try {
+                const baseFilmUrl = movie.href;
+                const langTitles = await fetchLanguageDerivedTitles(baseFilmUrl);
+                const slugTitle = slugToTitle(movie.href);
+
+                const BAD = /(th[eé]âtre|cin[eé]|rgfm|guzzo|beaubien|forum|imax|vip)/i;
+                const queries = uniqueNonEmpty([
+                    ...langTitles,
+                    movie.title,
+                    slugTitle
+                ]).filter(t => !BAD.test(t));
+
+                // Try to extract year from release date if available
+                let yearHint;
+                if (movie.releaseDate) {
+                    const year = parseInt(movie.releaseDate.split('-')[0], 10);
+                    if (!isNaN(year)) {
+                        yearHint = year;
+                    }
+                }
+
+                const film_id = await ensureMovieIdOrPlaceholder(db, {
+                    title: movie.title,
+                    yearHint,
+                    baseFilmUrl,
+                    extraQueries: [slugTitle, ...langTitles].filter(Boolean)
+                });
+
+                console.log(`[UPCOMING] ${movie.title} (ID: ${film_id}) — Release: ${movie.releaseDate || 'TBD'}`);
+
+                processed++;
+                if (SLEEP_MS > 0) await sleep(SLEEP_MS);
+            } catch (filmErr) {
+                console.warn(`⚠️ Coming soon movie error (${movie?.title || "?"}):`, filmErr?.message || filmErr);
+            }
+        }
+
+        console.log(`\nTotal processed: ${processed}`);
 
     } finally {
         await db.end();
