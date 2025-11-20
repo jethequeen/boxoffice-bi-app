@@ -2,8 +2,8 @@ name: Check for missing seats_sold data
 
 on:
   schedule:
-    # Run every hour
-    - cron: '0 * * * *'
+    # Run every 5 hours
+    - cron: '0 */5 * * *'
   workflow_dispatch:
 
 jobs:
