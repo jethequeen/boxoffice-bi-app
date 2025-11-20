@@ -311,14 +311,25 @@ async function tick() {
         }))
     );
 
-    console.log(`[tick] sampled ${due.length} show(s); buffered=${measurements.length}`);
+    if (LOG_LEVEL === "debug") {
+        console.log(`[tick] sampled ${due.length} show(s); buffered=${measurements.length}`);
+    }
 }
 
 /* ---------- FLUSH ---------- */
 async function flush(force=false) {
-    if (!force && measurements.length < FLUSH_BATCH) return;
+    if (!force && measurements.length < FLUSH_BATCH) {
+        if (LOG_LEVEL === "debug") {
+            console.log(`[flush] skipping, buffered=${measurements.length} < ${FLUSH_BATCH}`);
+        }
+        return;
+    }
     const batch = measurements.splice(0, measurements.length);
-    if (!batch.length) return;
+    if (!batch.length) {
+        console.log("[flush] no measurements to flush");
+        return;
+    }
+    console.log(`[flush] starting with ${batch.length} measurement(s), force=${force}`);
 
     const client = getClient();
     await client.connect();
@@ -384,18 +395,37 @@ async function cleanTmp() {
 }
 
 let shuttingDown = false;
-
+let wasInQuietHours = inQuietHours();
 
 /* ---------- Scheduling ---------- */
 async function main() {
     await ensureTmp();
     if (!inQuietHours()) await syncFromDb();
 
-    setInterval(() => { if (!inQuietHours()) syncFromDb().catch(e => console.error("[sync] error", e)); }, RESYNC_MIN * 60 * 1000);
-    setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, TICK_MS);
-    setInterval(() => { if (!inQuietHours()) flush(false).catch(e => console.error("[flush] error", e)); }, FLUSH_MIN * 60 * 1000);
-    setInterval(tryNightPrefill, 6 * 60 * 60 * 1000);  // every 6 hours, only runs during quiet hours
-    setInterval(cleanTmp, 30 * 60 * 1000);  // every 30 min
+    const timers = [];
+    timers.push(setInterval(() => { if (!inQuietHours()) syncFromDb().catch(e => console.error("[sync] error", e)); }, RESYNC_MIN * 60 * 1000));
+    timers.push(setInterval(() => { if (!inQuietHours()) tick().catch(e => console.error("[tick] error", e)); }, TICK_MS));
+    timers.push(setInterval(() => { if (!inQuietHours()) flush(false).catch(e => console.error("[flush] error", e)); }, FLUSH_MIN * 60 * 1000));
+    timers.push(setInterval(tryNightPrefill, 6 * 60 * 60 * 1000));  // every 6 hours, only runs during quiet hours
+    timers.push(setInterval(cleanTmp, 30 * 60 * 1000));  // every 30 min
+
+    // Force flush every 3 hours
+    timers.push(setInterval(() => {
+        if (!inQuietHours()) {
+            console.log("[flush] force flush (3-hour interval)");
+            flush(true).catch(e => console.error("[flush] 3-hour force error", e));
+        }
+    }, 3 * 60 * 60 * 1000));
+
+    // Check every minute if we're about to enter quiet hours, and flush before that
+    timers.push(setInterval(() => {
+        const nowQuiet = inQuietHours();
+        if (!wasInQuietHours && nowQuiet) {
+            console.log("[flush] entering quiet hours, forcing flush");
+            flush(true).catch(e => console.error("[flush] night-break force error", e));
+        }
+        wasInQuietHours = nowQuiet;
+    }, 60 * 1000));  // check every minute
 
     async function tryNightPrefill(){
         if (inQuietHours()) {

@@ -22,7 +22,7 @@
 
     # Your envs
     env_file:
-      - .env.txt
+      - .env
     environment:
       - TZ=America/Toronto
       - CE_ACCEPT_LANG=fr-CA,fr;q=0.9,en;q=0.8
