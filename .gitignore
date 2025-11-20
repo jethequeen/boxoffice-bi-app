@@ -22,3 +22,5 @@ build/
 
 # Optional Docker files
 *.pid
+/.claude/settings.local.json
+/db/db_schema
