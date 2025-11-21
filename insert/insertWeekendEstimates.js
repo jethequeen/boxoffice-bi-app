@@ -141,6 +141,28 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
                FROM targets t
            ),
 
+           /* ---------- Check if first-week movies only have sales data from previews (no Fri-Sun sales data) ---------- */
+           preview_only_flags AS (
+               SELECT
+                   ff.film_id,
+                   -- Has seats_sold data from preview days
+                   EXISTS (
+                       SELECT 1 FROM showings s, w
+                       WHERE s.movie_id = ff.film_id
+                         AND s.date BETWEEN (w.start_date - INTERVAL '3 days') AND (w.start_date - INTERVAL '1 day')
+                         AND s.seats_sold IS NOT NULL
+                   )
+                   AND
+                   -- But NO seats_sold data from Fri-Sun
+                   NOT EXISTS (
+                       SELECT 1 FROM showings s, w
+                       WHERE s.movie_id = ff.film_id
+                         AND s.date BETWEEN w.start_date AND w.end_date
+                         AND s.seats_sold IS NOT NULL
+                   ) AS is_preview_only
+               FROM first_flags ff
+               WHERE ff.is_first = true
+           ),
 
       /* ---------- Weekend base for estimates (includes previews for first week) ---------- */
       wk_base AS (
@@ -235,11 +257,13 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
           b.tf,
           COALESCE(SUM(seats_sold) FILTER (WHERE seats_sold IS NOT NULL), 0) AS known_sum,
           COUNT(*) FILTER (WHERE seats_sold IS NULL)                         AS missing_cnt,
-          COALESCE(k.avg_tf, a.avg_any)                                      AS est_per_show
+          -- Scale up preview averages by 2x for preview-only movies
+          COALESCE(k.avg_tf, a.avg_any) * CASE WHEN COALESCE(pof.is_preview_only, false) THEN 2.0 ELSE 1 END AS est_per_show
         FROM wk_b b
         LEFT JOIN wk_known k USING (film_id, tf)
         LEFT JOIN wk_any   a USING (film_id)
-        GROUP BY b.film_id, b.tf, COALESCE(k.avg_tf, a.avg_any)
+        LEFT JOIN preview_only_flags pof ON pof.film_id = b.film_id
+        GROUP BY b.film_id, b.tf, COALESCE(k.avg_tf, a.avg_any), pof.is_preview_only
       ),
       wk_seats AS (
         SELECT
