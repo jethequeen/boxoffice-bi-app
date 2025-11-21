@@ -11,12 +11,30 @@ const EMAIL_PASS = process.env.EMAIL_PASS || '';
 const EMAIL_FROM = process.env.EMAIL_FROM || 'noreply@boxoffice.local';
 const EMAIL_TO = process.env.EMAIL_TO || 'admin@boxoffice.local';
 
-/* ---------- Alert window (5 hours after show start) ---------- */
-const ALERT_HOURS_AFTER = 5;
+/* ---------- Alert window (0-5 hours after show start) ---------- */
+const ALERT_HOURS_AFTER = 0;
 const CHECK_WINDOW_HOURS = 5; // Check shows from the last 5-hour window
-const MISSING_DATA_THRESHOLD = 0.10; // Alert only if 10% or more shows are missing data
+const MISSING_DATA_THRESHOLD = 0.30; // Alert only if 30% or more shows are missing data
+
+/* ---------- Quiet hours (daemon inactive) ---------- */
+const TZ = "America/Toronto";
+const QUIET_START = "01:00"; // inclusive
+const QUIET_END = "09:30"; // exclusive
+
+function inQuietHours(now = new Date()) {
+    const fmt = new Intl.DateTimeFormat("en-CA", {timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false});
+    const [{value: HH}, , {value: mm}] = fmt.formatToParts(now);
+    const cur = `${HH}:${mm}`;
+    return (cur >= QUIET_START && cur < QUIET_END);
+}
 
 async function checkMissingData() {
+    // Skip check during quiet hours when daemon is inactive
+    if (inQuietHours()) {
+        console.log('[missing-data-alert] ✓ Skipping check during quiet hours (daemon inactive 01:00-09:30)');
+        return;
+    }
+
     const client = getClient();
     await client.connect();
 

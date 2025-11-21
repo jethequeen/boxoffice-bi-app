@@ -134,15 +134,15 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
            first_flags AS (
                SELECT t.film_id,
                       NOT EXISTS (
-                          SELECT 1 FROM showings ss, w
-                          WHERE ss.movie_id = t.film_id
-                            AND ss.date < (w.start_date - INTERVAL '1 day')  -- before Thursday
+                          SELECT 1 FROM revenues r
+                          WHERE r.film_id = t.film_id
+                            AND r.weekend_id < $1  -- has this movie appeared in previous weekends?
                       ) AS is_first
                FROM targets t
            ),
 
 
-      /* ---------- Weekend base for estimates (Thu-if-first allowed) ---------- */
+      /* ---------- Weekend base for estimates (includes previews for first week) ---------- */
       wk_base AS (
         SELECT
           s.movie_id::int AS film_id,
@@ -152,8 +152,9 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
         FROM showings s
         JOIN first_flags ff ON ff.film_id = s.movie_id::int
         JOIN w ON TRUE
-        WHERE (s.date BETWEEN w.start_date AND w.end_date)
-           OR (s.date = w.start_date - INTERVAL '1 day' AND ff.is_first)
+        WHERE s.date BETWEEN
+          CASE WHEN ff.is_first THEN (w.start_date - INTERVAL '3 days') ELSE w.start_date END
+          AND w.end_date
       ),
 
            wk_present AS (
@@ -263,7 +264,7 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
         JOIN first_flags ff ON ff.film_id = s.movie_id::int
         JOIN w ON TRUE
         WHERE s.date BETWEEN (w.end_date - INTERVAL '6 day')
-                       AND (w.start_date - CASE WHEN ff.is_first THEN INTERVAL '2 day' ELSE INTERVAL '1 day' END)
+                       AND CASE WHEN ff.is_first THEN (w.start_date - INTERVAL '4 days') ELSE (w.start_date - INTERVAL '1 day') END
       ),
       mw_banded AS (
         SELECT *,
@@ -435,8 +436,8 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
                      first_flags AS (
                          SELECT t.film_id,
                                 NOT EXISTS (
-                                    SELECT 1 FROM showings ss, w
-                                    WHERE ss.movie_id = t.film_id AND ss.date < w.start_date
+                                    SELECT 1 FROM revenues r
+                                    WHERE r.film_id = t.film_id AND r.weekend_id < $1
                                 ) AS is_first
                          FROM (SELECT DISTINCT film_id FROM revenues WHERE weekend_id = $1) t
                      ),
@@ -447,10 +448,9 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
                                   LEFT JOIN first_flags ff ON ff.film_id = t.film_id
                                   LEFT JOIN showings s
                                             ON s.movie_id = t.film_id
-                                                AND (
-                                                   s.date BETWEEN w.start_date AND w.end_date
-                                                       OR (s.date = w.start_date - INTERVAL '1 day' AND ff.is_first)
-                                                   )
+                                                AND s.date BETWEEN
+                                                    CASE WHEN ff.is_first THEN (w.start_date - INTERVAL '3 days') ELSE w.start_date END
+                                                    AND w.end_date
                          GROUP BY t.film_id
                      ),
                      ranked AS (
@@ -515,4 +515,27 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
     } finally {
         await client.end();
     }
+}
+
+// Run if executed directly
+if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}`) {
+    const weekendId = process.argv[2] ? parseInt(process.argv[2], 10) : null;
+    const ticketPrice = process.argv[3] ? parseFloat(process.argv[3]) : 14;
+    const biasScale = process.argv[4] ? parseFloat(process.argv[4]) : 0.9;
+
+    if (!weekendId) {
+        console.error('Usage: node insert/insertWeekendEstimates.js <weekendId> [ticketPrice] [biasScale]');
+        console.error('Example: node insert/insertWeekendEstimates.js 202547 14 0.9');
+        process.exit(1);
+    }
+
+    insertWeekendEstimates(weekendId, ticketPrice, biasScale)
+        .then(() => {
+            console.log('✅ Done');
+            process.exit(0);
+        })
+        .catch(err => {
+            console.error('❌ Error:', err);
+            process.exit(1);
+        });
 }
