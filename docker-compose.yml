@@ -40,7 +40,7 @@
       - TMPDIR=/tmp/seats-sold
       # Turn OFF crash dumps unless you really need them
       - PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0
-      - PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1
+      - PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=0
       - PLAYWRIGHT_DISABLE_MULTIPATH=1
       # Optional: toggle your own debug snapshots OFF by default
       - CE_DEBUG_SNAP=0

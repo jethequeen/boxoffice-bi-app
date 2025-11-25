@@ -215,8 +215,14 @@ async function syncFromDb() {
                 const cached = theaterKeyCache.get(r.theater_id);
                 if (!cached || (now - cached.fetchedAt) > KEY_CACHE_TTL_MS) {
                     if (!r.theatre_url || !r.location_id) continue;
-                    const key = await getShowtimesKeyFromTheatreUrl(r.theatre_url);
-                    theaterKeyCache.set(r.theater_id, { key, locationId: r.location_id, fetchedAt: Date.now() });
+                    try {
+                        const key = await getShowtimesKeyFromTheatreUrl(r.theatre_url);
+                        theaterKeyCache.set(r.theater_id, { key, locationId: r.location_id, fetchedAt: Date.now() });
+                    } catch (e) {
+                        console.error(`[sync] failed to fetch Cineplex key for theater ${r.theater_id} (${name}):`, e?.message || String(e));
+                        // Don't cache the failure, will retry next sync
+                        continue;
+                    }
                 }
             }
 
