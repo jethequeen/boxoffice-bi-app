@@ -3,19 +3,35 @@ import { getClient } from "../db/client.js";
 
 /**
  * Ensures a theater exists and returns its id.
- * Requires a UNIQUE on theaters(name).
+ * Uses case-insensitive matching to find existing theaters.
  */
 async function ensureTheater(client, name, company = null, screens = null) {
+    // First, try to find an existing theater with case-insensitive match
+    const existing = await client.query(
+        `SELECT id FROM theaters WHERE UPPER(name) = UPPER($1) LIMIT 1`,
+        [name]
+    );
+
+    if (existing.rows.length > 0) {
+        // Theater already exists, optionally update metadata if missing
+        const theaterId = existing.rows[0].id;
+        if (company || screens) {
+            await client.query(
+                `UPDATE theaters
+                 SET company = COALESCE(company, $1),
+                     screens = COALESCE(screens, $2)
+                 WHERE id = $3`,
+                [company, screens, theaterId]
+            );
+        }
+        return theaterId;
+    }
+
+    // Theater doesn't exist, insert it
     const res = await client.query(
-        `
-            INSERT INTO theaters (name, company, screens)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (name) DO UPDATE
-                SET
-                    company = COALESCE(theaters.company, EXCLUDED.company),
-                    screens = COALESCE(theaters.screens, EXCLUDED.screens)
-            RETURNING id
-        `,
+        `INSERT INTO theaters (name, company, screens)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
         [name, company, screens]
     );
     return res.rows[0]?.id;
