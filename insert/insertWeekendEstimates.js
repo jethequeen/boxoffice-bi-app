@@ -370,6 +370,19 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
                 LIMIT 1)::bigint AS prev_rev
         FROM targets t
       ),
+      is_first_real_weekend AS (
+        SELECT t.film_id,
+               NOT EXISTS (
+                 SELECT 1
+                 FROM revenues r
+                 JOIN weekends w2 ON w2.id = r.weekend_id
+                 JOIN movies m ON m.id = t.film_id
+                 WHERE r.film_id = t.film_id
+                   AND r.weekend_id < $1
+                   AND w2.end_date >= m.release_date
+               ) AS is_first_real
+        FROM targets t
+      ),
       prev_cumul AS (
         SELECT t.film_id,
                COALESCE((SELECT r.cumulatif_qc_to_date
@@ -387,8 +400,9 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
           pc.cumul_prev      AS cumul_prev,
           (pc.cumul_prev + COALESCE(mm.revenue_midweek,0) + COALESCE(wm.revenue_weekend,0))::bigint AS cumul_now,
           CASE
+            WHEN ifrw.is_first_real THEN NULL
             WHEN wm.revenue_weekend IS NULL OR pwr.prev_rev IS NULL OR pwr.prev_rev = 0 THEN NULL
-            ELSE ROUND(((wm.revenue_weekend::numeric / pwr.prev_rev::numeric) - 1) * 100, 2)
+            ELSE LEAST(9999.99, GREATEST(-9999.99, ROUND(((wm.revenue_weekend::numeric / pwr.prev_rev::numeric) - 1) * 100, 2)))
           END::numeric(6,2) AS change_qc,
           wf.average_showing_occupancy::numeric(6,4) AS average_showing_occupancy,
           wf.showings_proportion::numeric(6,4)       AS showings_proportion
@@ -398,6 +412,7 @@ export async function insertWeekendEstimates(weekendId, ticketPrice = 14, biasSc
         JOIN midweek_money    mm  USING (film_id)
         JOIN prev_cumul       pc  USING (film_id)
         JOIN prev_weekend_rev pwr USING (film_id)
+        JOIN is_first_real_weekend ifrw USING (film_id)
         LEFT JOIN wk_features wf  USING (film_id)
       )
 
