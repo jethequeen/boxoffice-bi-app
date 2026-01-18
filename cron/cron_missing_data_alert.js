@@ -14,7 +14,7 @@ const EMAIL_TO = process.env.EMAIL_TO || 'admin@boxoffice.local';
 /* ---------- Alert window (0-5 hours after show start) ---------- */
 const ALERT_HOURS_AFTER = 0;
 const CHECK_WINDOW_HOURS = 5; // Check shows from the last 5-hour window
-const MISSING_DATA_THRESHOLD = 0.30; // Alert only if 30% or more shows are missing data
+const MISSING_DATA_THRESHOLD = 0.7; // Alert only if 30% or more shows are missing data
 
 /* ---------- Quiet hours (daemon inactive) ---------- */
 const TZ = "America/Toronto";
